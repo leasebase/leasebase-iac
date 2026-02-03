@@ -1,0 +1,39 @@
+name: Terraform Quality
+
+on:
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  fmt-validate-plan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.0
+
+      - name: Terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: Terraform validate
+        run: |
+          for d in envs/dev envs/qa envs/uat envs/prod; do
+            echo "Validating $d";
+            (cd "$d" && terraform init -backend=false && terraform validate);
+          done
+
+      - name: Terraform plan (dev only)
+        env:
+          TF_IN_AUTOMATION: "true"
+        run: |
+          cd envs/dev
+          terraform init -backend=false
+          terraform plan -var-file="dev.tfvars.example" || true
