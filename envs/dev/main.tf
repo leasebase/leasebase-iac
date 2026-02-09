@@ -79,6 +79,11 @@ module "leasebase" {
   create_dns_record = var.create_dns_record
   route53_zone_id   = var.route53_zone_id
   domain_name       = var.domain_name
+
+  # GitHub OIDC
+  github_org      = var.github_org
+  github_repo_api = var.github_repo_api
+  github_repo_web = var.github_repo_web
 }
 
 ############################

@@ -262,3 +262,25 @@ variable "domain_name" {
   type        = string
   default     = "leasebase.co"
 }
+
+############################
+# GitHub OIDC / CI-CD
+############################
+
+variable "github_org" {
+  description = "GitHub organization name."
+  type        = string
+  default     = "motart"
+}
+
+variable "github_repo_api" {
+  description = "GitHub repository name for the API."
+  type        = string
+  default     = "leasebase-backend"
+}
+
+variable "github_repo_web" {
+  description = "GitHub repository name for the web frontend."
+  type        = string
+  default     = "leasebase-web"
+}
