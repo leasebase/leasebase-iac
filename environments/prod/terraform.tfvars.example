@@ -1,0 +1,28 @@
+# Production Environment Variables
+# Copy this to terraform.tfvars and adjust as needed
+#
+# WARNING: This is PRODUCTION. Review all changes carefully.
+
+aws_region = "us-west-2"
+
+# VPC Configuration (3 AZs for high availability)
+vpc_cidr             = "10.40.0.0/16"
+availability_zones   = ["us-west-2a", "us-west-2b", "us-west-2c"]
+public_subnet_cidrs  = ["10.40.1.0/24", "10.40.2.0/24", "10.40.3.0/24"]
+private_subnet_cidrs = ["10.40.10.0/24", "10.40.11.0/24", "10.40.12.0/24"]
+
+# Production features (all enabled by default)
+enable_nat_gateway    = true   # Required for private subnet internet access
+enable_vpc_flow_logs  = true   # Required for compliance/security auditing
+enable_vpc_endpoints  = true   # Recommended for secure ECR/SSM/logs access
+
+# IAM Configuration
+management_account_id = "MANAGEMENT_ACCOUNT_ID"  # Account that can assume terraform role
+terraform_external_id = "leasebase-terraform-prod"
+
+# Tags
+tags = {
+  Project     = "LeaseBase"
+  Environment = "prod"
+  ManagedBy   = "Terraform"
+}

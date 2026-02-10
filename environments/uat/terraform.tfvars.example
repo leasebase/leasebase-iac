@@ -1,0 +1,26 @@
+# UAT Environment Variables
+# Copy this to terraform.tfvars and adjust as needed
+
+aws_region = "us-west-2"
+
+# VPC Configuration
+vpc_cidr             = "10.30.0.0/16"
+availability_zones   = ["us-west-2a", "us-west-2b"]
+public_subnet_cidrs  = ["10.30.1.0/24", "10.30.2.0/24"]
+private_subnet_cidrs = ["10.30.10.0/24", "10.30.11.0/24"]
+
+# Optional features (UAT mirrors prod more closely)
+enable_nat_gateway    = true   # UAT needs NAT for production parity
+enable_vpc_flow_logs  = true   # Enable for debugging
+enable_vpc_endpoints  = false  # Set to true if you need private ECR/SSM access
+
+# IAM Configuration
+management_account_id = "MANAGEMENT_ACCOUNT_ID"  # Account that can assume terraform role
+terraform_external_id = "leasebase-terraform-uat"
+
+# Tags
+tags = {
+  Project     = "LeaseBase"
+  Environment = "uat"
+  ManagedBy   = "Terraform"
+}

@@ -1,150 +1,334 @@
-# leasebase-iac
+# LeaseBase Infrastructure
 
-Infrastructure-as-code (Terraform) and CI/CD workflows for deploying Leasebase to a multi-account AWS setup.
+Terraform-based infrastructure-as-code for provisioning the LeaseBase AWS foundation across multiple environments.
 
-- **Accounts/environments**: `leasebase-dev`, `leasebase-qa`, `leasebase-uat`, `leasebase-prod`
-- **Primary region**: `us-west-2` (application, RDS, Cognito, ALB, ECS)
-- **Edge region**: `us-east-1` (CloudFront + ACM for web certificates)
+## Overview
 
-This repo manages:
+This repository manages the AWS infrastructure for LeaseBase across 4 isolated environments:
 
-- VPC, subnets, NAT, and networking
-- ECS cluster + services for `leasebase-api` and `leasebase-web`
-- ECR repositories for API and web containers
-- Application Load Balancer (ALB) for API + web
-- RDS PostgreSQL (private)
-- S3 document bucket (private)
-- Cognito User Pool, App Client, and hosted domain
-- SES identities and basic configuration
-- Secrets Manager parameters for credentials and keys
-- CloudWatch log groups
-- CloudFront distribution for the web application
-- Route53 records and ACM certificates
-- Remote Terraform state (S3 + DynamoDB per account)
-- GitHub Actions CI/CD workflows
+| Environment | VPC CIDR | Description |
+|-------------|----------|-------------|
+| `dev` | 10.10.0.0/16 | Development environment |
+| `qa` | 10.20.0.0/16 | QA/Testing environment |
+| `uat` | 10.30.0.0/16 | User Acceptance Testing |
+| `prod` | 10.40.0.0/16 | Production environment |
 
-See `docs/` for detailed usage.
+Each environment runs in its **own AWS account** within the same AWS Organization.
 
----
+## Architecture
 
-## Deploying to each environment
+### What Gets Created
 
-Detailed CI/CD and account bootstrap docs live in:
+For each environment, the infrastructure includes:
 
-- `docs/ACCOUNT_BOOTSTRAP.md` – how to prepare each AWS account (remote state, GitHub OIDC roles, DNS patterns).
-- `docs/DEPLOYMENT.md` – how GitHub Actions deploys to `dev`, `qa`, `uat`, `prod`, and how to run Terraform locally.
+- **VPC & Networking**
+  - VPC with configurable CIDR
+  - Public subnets (for ALB, NAT Gateway)
+  - Private subnets (for ECS, RDS)
+  - Internet Gateway
+  - NAT Gateway (optional, recommended for UAT/Prod)
+  - Route tables for public and private subnets
+  - VPC Flow Logs (optional)
 
-Below is a concise "how to deploy" summary per environment.
+- **Security**
+  - ALB security group (ports 80, 443)
+  - ECS security group (internal traffic from ALB)
+  - RDS security group (PostgreSQL from ECS)
+  - VPC Endpoints (S3, DynamoDB gateway; ECR, SSM, CloudWatch Logs interface)
 
-### Prerequisites (all environments)
+- **IAM**
+  - Terraform cross-account access role
+  - ECS task execution role
+  - ECS task role
 
-- Terraform **1.6+** installed.
-- AWS CLI v2 installed.
-- AWS profiles configured for each account:
-  - `leasebase-dev`
-  - `leasebase-qa`
-  - `leasebase-uat`
-  - `leasebase-prod`
-- Remote state S3 bucket + DynamoDB table created for each account using `scripts/bootstrap_remote_state.sh` (see `docs/ACCOUNT_BOOTSTRAP.md`).
-- Example `*.tfvars.example` files copied to real `*.tfvars` and filled out (non-secret values):
+### Directory Structure
 
-```bash
-cd envs/dev
-cp dev.tfvars.example dev.tfvars
-# edit dev.tfvars
+```
+leasebase-iac/
+├── bootstrap/           # Remote state backend setup
+│   ├── main.tf
+│   ├── variables.tf
+│   └── outputs.tf
+├── modules/             # Reusable Terraform modules
+│   ├── vpc/             # VPC, subnets, NAT, flow logs
+│   ├── security/        # Security groups, VPC endpoints
+│   └── iam/             # IAM roles for Terraform and ECS
+├── environments/        # Environment-specific configurations
+│   ├── dev/
+│   ├── qa/
+│   ├── uat/
+│   └── prod/
+├── scripts/
+│   └── destroy.sh       # Safe destruction script
+├── Makefile             # Command shortcuts
+└── README.md
 ```
 
-Secrets (DB passwords, Stripe keys, JWT secrets, etc.) are **not** stored in tfvars. They are provisioned via Terraform into **Secrets Manager / SSM** and populated out-of-band.
+## Prerequisites
 
-### Dev environment (`envs/dev`, account `leasebase-dev`)
+- **Terraform** >= 1.6.0
+- **AWS CLI** v2 configured with profiles for each account
+- AWS accounts set up in an AWS Organization
+- Permissions to create S3 buckets, DynamoDB tables, and IAM roles
 
-**Local Terraform (optional):**
+### AWS Profile Setup
+
+Configure AWS CLI profiles for each environment's account:
 
 ```bash
-cd envs/dev
+# ~/.aws/config
+[profile leasebase-dev]
+region = us-west-2
+sso_start_url = https://your-org.awsapps.com/start
+sso_region = us-west-2
+sso_account_id = 111111111111
+sso_role_name = AdministratorAccess
+
+[profile leasebase-qa]
+region = us-west-2
+sso_account_id = 222222222222
+# ... similar config
+
+[profile leasebase-uat]
+# ...
+
+[profile leasebase-prod]
+# ...
+```
+
+## Quick Start
+
+### 1. Bootstrap Remote State (One-time per account)
+
+Before using Terraform, bootstrap the S3 backend in each account:
+
+```bash
+# Set your AWS profile
 export AWS_PROFILE=leasebase-dev
 
-# One-time (after remote state is configured)
-terraform init
-
-# Plan and apply using your dev.tfvars
-terraform plan -var-file="dev.tfvars" -out dev.plan
-terraform apply dev.plan
+# Bootstrap the dev account
+make bootstrap ENV=dev
 ```
 
-**Via GitHub Actions (primary path):**
+This creates:
+- S3 bucket: `leasebase-tfstate-{account_id}`
+- DynamoDB table: `leasebase-terraform-locks`
+- IAM role: `leasebase-terraform-access`
 
-- Pushing to `main` in this repo triggers the `deploy-dev` workflow (see `docs/DEPLOYMENT.md`).
-- The workflow will:
-  - Assume `AWS_DEV_ROLE_ARN` via OIDC.
-  - Build and push Docker images for `leasebase-api` and `leasebase-web`.
-  - Run `terraform init/plan/apply` in `envs/dev`.
-  - Run Prisma DB migrations via an ECS one-off task.
-
-### QA environment (`envs/qa`, account `leasebase-qa`)
-
-**Local Terraform:**
+### 2. Configure the Environment
 
 ```bash
-cd envs/qa
-export AWS_PROFILE=leasebase-qa
+# Copy configuration templates
+cd environments/dev
+cp backend.hcl.example backend.hcl
+cp terraform.tfvars.example terraform.tfvars
 
-terraform init
-terraform plan -var-file="qa.tfvars" -out qa.plan
-terraform apply qa.plan
+# Edit backend.hcl with your account ID
+# Edit terraform.tfvars with your settings
 ```
 
-**Via GitHub Actions:**
-
-- Use the "Deploy QA" workflow in the **Actions** tab.
-- Manually trigger it (`workflow_dispatch`), select the commit/branch to deploy.
-- The workflow assumes `AWS_QA_ROLE_ARN`, builds/pushes images, applies Terraform in `envs/qa`, and runs migrations.
-
-### UAT environment (`envs/uat`, account `leasebase-uat`)
-
-**Local Terraform:**
+### 3. Initialize and Plan
 
 ```bash
-cd envs/uat
-export AWS_PROFILE=leasebase-uat
-
-terraform init
-terraform plan -var-file="uat.tfvars" -out uat.plan
-terraform apply uat.plan
+make init ENV=dev
+make plan ENV=dev
 ```
 
-**Via GitHub Actions:**
-
-- Use the "Deploy UAT" workflow.
-- Trigger it manually, choose the commit/branch.
-- The workflow assumes `AWS_UAT_ROLE_ARN`, builds/pushes images, applies Terraform in `envs/uat`, and runs migrations.
-
-### Prod environment (`envs/prod`, account `leasebase-prod`)
-
-**Local Terraform (with extra care):**
+### 4. Apply Infrastructure
 
 ```bash
-cd envs/prod
-export AWS_PROFILE=leasebase-prod
-
-terraform init
-terraform plan -var-file="prod.tfvars" -out prod.plan
-# Carefully review the plan before applying
-terraform apply prod.plan
+make apply ENV=dev
 ```
 
-**Via GitHub Actions (recommended):**
+## Commands Reference
 
-- Use the "Deploy Prod" workflow.
-- It is typically protected by GitHub **environments** (manual approvals, reviewers).
-- The workflow assumes `AWS_PROD_ROLE_ARN`, builds/pushes images, applies Terraform in `envs/prod`, and runs migrations.
+### Environment Commands
 
-### Notes on rollbacks and troubleshooting
+| Command | Description |
+|---------|-------------|
+| `make bootstrap ENV=<env>` | Bootstrap remote state backend |
+| `make init ENV=<env>` | Initialize Terraform |
+| `make plan ENV=<env>` | Plan infrastructure changes |
+| `make apply ENV=<env>` | Apply infrastructure changes |
+| `make destroy ENV=<env>` | Destroy infrastructure (with safety prompts) |
+| `make output ENV=<env>` | Show Terraform outputs |
 
-- To rollback infrastructure:
-  - Identify a known-good commit.
-  - Re-run the relevant deploy workflow pointing at that commit, or check out that commit locally and re-run `terraform apply` with the same tfvars (see `docs/DEPLOYMENT.md` §7).
-- To rollback application images:
-  - Pick previous image tags in ECR for `leasebase-api` and `leasebase-web`.
-  - Pin those tags via tfvars/variables or workflow inputs and redeploy.
-- Secret rotation and sensitive changes are covered in `docs/DEPLOYMENT.md` §8.
+### Global Commands
+
+| Command | Description |
+|---------|-------------|
+| `make validate` | Validate all environments |
+| `make fmt` | Format all Terraform code |
+| `make fmt-check` | Check formatting (CI mode) |
+| `make clean` | Remove .terraform directories |
+
+### Examples
+
+```bash
+# Plan dev environment
+make plan ENV=dev
+
+# Apply to QA
+make apply ENV=qa
+
+# Destroy dev (will prompt for confirmation)
+make destroy ENV=dev
+
+# Preview what would be destroyed
+make destroy-plan ENV=dev
+
+# Format code
+make fmt
+
+# Validate all environments
+make validate
+```
+
+## Environment Configuration
+
+Each environment has its own configuration files in `environments/<env>/`:
+
+- `backend.hcl` - S3 backend configuration (copy from `backend.hcl.example`)
+- `terraform.tfvars` - Variable overrides (copy from `terraform.tfvars.example`)
+
+### Key Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `vpc_cidr` | varies | CIDR block for the VPC |
+| `enable_nat_gateway` | false (dev/qa), true (uat/prod) | Enable NAT for private subnets |
+| `enable_vpc_flow_logs` | false (dev/qa), true (uat/prod) | Enable VPC flow logging |
+| `enable_vpc_endpoints` | false (dev/qa), true (prod) | Enable interface VPC endpoints |
+| `management_account_id` | required | Account that can assume Terraform role |
+
+### Environment Defaults
+
+| Feature | Dev | QA | UAT | Prod |
+|---------|-----|-----|-----|------|
+| NAT Gateway | ❌ | ❌ | ✅ | ✅ (multi-AZ) |
+| VPC Flow Logs | ❌ | ❌ | ✅ | ✅ |
+| VPC Endpoints | ❌ | ❌ | ❌ | ✅ |
+| Availability Zones | 2 | 2 | 2 | 3 |
+
+## Destroying Infrastructure
+
+⚠️ **Use extreme caution when destroying infrastructure, especially production.**
+
+### Safe Destruction
+
+The `make destroy` command uses a safety script with multiple confirmation prompts:
+
+```bash
+# Destroy dev environment
+make destroy ENV=dev
+```
+
+The script will:
+1. Show the environment and AWS account ID
+2. Ask for confirmation (`yes/no`)
+3. Verify the last 4 digits of the AWS account ID
+4. For production: require typing `destroy production`
+5. Show the destruction plan
+6. Ask for final confirmation before applying
+
+### Dry Run
+
+Preview what would be destroyed without making changes:
+
+```bash
+./scripts/destroy.sh dev --dry-run
+```
+
+## Outputs
+
+After applying, the following outputs are available:
+
+| Output | Description |
+|--------|-------------|
+| `vpc_id` | VPC ID |
+| `vpc_cidr` | VPC CIDR block |
+| `public_subnet_ids` | List of public subnet IDs |
+| `private_subnet_ids` | List of private subnet IDs |
+| `alb_security_group_id` | Security group for ALB |
+| `ecs_security_group_id` | Security group for ECS tasks |
+| `rds_security_group_id` | Security group for RDS |
+| `ecs_task_execution_role_arn` | ARN of ECS task execution role |
+| `ecs_task_role_arn` | ARN of ECS task role |
+
+View outputs:
+
+```bash
+make output ENV=dev
+```
+
+## CI/CD Integration
+
+While this repository is designed to run locally, it can also be used in CI/CD pipelines.
+
+### Example GitHub Actions Workflow
+
+```yaml
+name: Terraform Plan
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.0
+      
+      - name: Terraform Format Check
+        run: make fmt-check
+      
+      - name: Terraform Validate
+        run: make validate
+```
+
+## Troubleshooting
+
+### Backend not configured
+
+```
+Error: Backend not configured
+```
+
+Run `make init ENV=<env>` after copying `backend.hcl.example` to `backend.hcl`.
+
+### Access Denied
+
+```
+Error: Access Denied when accessing S3 bucket
+```
+
+Ensure your AWS profile has the correct permissions and the bootstrap has been run.
+
+### State Lock
+
+```
+Error: Error acquiring the state lock
+```
+
+Another Terraform process may be running. Wait for it to finish or force-unlock:
+
+```bash
+cd environments/<env>
+terraform force-unlock <LOCK_ID>
+```
+
+## Contributing
+
+1. Create a feature branch
+2. Make changes
+3. Run `make fmt` and `make validate`
+4. Submit a pull request
+
+## License
+
+Copyright © LeaseBase. All rights reserved.
