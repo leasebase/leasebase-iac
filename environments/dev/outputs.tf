@@ -2,84 +2,42 @@
 # Dev Environment Outputs
 ################################################################################
 
-output "environment" {
-  description = "Environment name"
-  value       = "dev"
-}
-
-output "account_id" {
-  description = "AWS Account ID"
-  value       = data.aws_caller_identity.current.account_id
-}
-
-output "region" {
-  description = "AWS Region"
-  value       = data.aws_region.current.name
-}
-
-################################################################################
-# VPC Outputs
-################################################################################
-
 output "vpc_id" {
   description = "ID of the VPC"
-  value       = module.vpc.vpc_id
+  value       = module.common.vpc_id
 }
 
-output "vpc_cidr" {
-  description = "CIDR block of the VPC"
-  value       = module.vpc.vpc_cidr
+output "ecr_api_repository_url" {
+  description = "ECR repository URL for API"
+  value       = module.common.ecr_api_repository_url
 }
 
-output "public_subnet_ids" {
-  description = "List of public subnet IDs"
-  value       = module.vpc.public_subnet_ids
+output "ecr_web_repository_url" {
+  description = "ECR repository URL for web"
+  value       = module.common.ecr_web_repository_url
 }
 
-output "private_subnet_ids" {
-  description = "List of private subnet IDs"
-  value       = module.vpc.private_subnet_ids
+output "alb_dns_name" {
+  description = "DNS name of the ALB"
+  value       = module.common.alb_dns_name
 }
 
-output "availability_zones" {
-  description = "List of availability zones"
-  value       = module.vpc.availability_zones
+output "rds_endpoint" {
+  description = "RDS endpoint"
+  value       = module.common.rds_endpoint
 }
 
-################################################################################
-# Security Outputs
-################################################################################
-
-output "alb_security_group_id" {
-  description = "ID of the ALB security group"
-  value       = module.security.alb_sg_id
+output "ecs_cluster_name" {
+  description = "ECS cluster name"
+  value       = module.common.ecs_cluster_name
 }
 
-output "ecs_security_group_id" {
-  description = "ID of the ECS security group"
-  value       = module.security.ecs_sg_id
+output "ecs_api_service_name" {
+  description = "ECS API service name"
+  value       = module.common.ecs_api_service_name
 }
 
-output "rds_security_group_id" {
-  description = "ID of the RDS security group"
-  value       = module.security.rds_sg_id
-}
-
-################################################################################
-# IAM Outputs
-################################################################################
-
-output "terraform_access_role_arn" {
-  description = "ARN of the Terraform cross-account access role"
-  value       = module.iam.terraform_access_role_arn
-}
-
-output "ecs_task_execution_role_arn" {
-  description = "ARN of the ECS task execution role"
-  value       = module.iam.ecs_task_execution_role_arn
-}
-
-output "ecs_task_role_arn" {
-  description = "ARN of the ECS task role"
-  value       = module.iam.ecs_task_role_arn
+output "ecs_web_service_name" {
+  description = "ECS web service name"
+  value       = module.common.ecs_web_service_name
 }
