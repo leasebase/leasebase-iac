@@ -1,236 +1,156 @@
-# LeaseBase Infrastructure as Code
+# LeaseBase Infrastructure as Code (v2)
 
-Terraform-based infrastructure for deploying the LeaseBase application to AWS.
+Terraform-based microservices infrastructure for LeaseBase on AWS.
 
 ## Architecture
 
-```
-                                    ┌─────────────────┐
-                                    │   CloudFront    │ (optional)
-                                    │  Static Assets  │
-                                    └────────┬────────┘
-                                             │
-┌──────────────────────────────────────────────────────────────────────────┐
-│                              Public Subnets                              │
-│  ┌─────────────┐    ┌─────────────────────────────────────────────────┐  │
-│  │     ALB     │───▶│  ECS Fargate Cluster                            │  │
-│  │  (HTTP/S)   │    │  ┌─────────────┐  ┌─────────────┐               │  │
-│  └─────────────┘    │  │  API Service │  │ Web Service │               │  │
-│        │            │  │  (backend)   │  │ (frontend)  │               │  │
-│        │            │  └──────┬──────┘  └─────────────┘               │  │
-│        │            └─────────┼───────────────────────────────────────┘  │
-└────────┼──────────────────────┼──────────────────────────────────────────┘
-         │                      │
-┌────────┼──────────────────────┼──────────────────────────────────────────┐
-│        │             Private Subnets                                     │
-│        │                      │                                          │
-│        │            ┌─────────▼─────────┐                                │
-│        │            │   RDS PostgreSQL  │                                │
-│        │            └───────────────────┘                                │
-└────────┼─────────────────────────────────────────────────────────────────┘
-         │
-    ┌────▼────┐
-    │   ECR   │
-    │  Repos  │
-    └─────────┘
-```
+See `architecture.mmd` for the full Mermaid diagram. Key components:
+
+- **Edge**: Route53 -> CloudFront -> (optional WAF) -> API Gateway HTTP API
+- **API Layer**: API Gateway -> VPC Link -> internal ALB -> ECS Fargate services
+- **Compute**: 10 ECS Fargate microservices in private subnets (no public IPs)
+- **Data**: Aurora PostgreSQL Serverless v2, ElastiCache Redis, OpenSearch (optional)
+- **Async**: EventBridge bus + SQS queues (notifications, document-processing, reporting)
+- **Auth**: Cognito User Pool with web + mobile clients
+- **Storage**: S3 documents bucket (KMS-encrypted, lifecycle policies)
+- **Security**: KMS keys, Secrets Manager, least-privilege IAM, tight SGs
+- **Observability**: CloudWatch dashboard, alarms, SNS topic
 
 ## Directory Structure
 
 ```
 leasebase-iac/
+├── modules/                  # v2 Terraform modules
+│   ├── vpc/                  # VPC, subnets, NAT GWs, VPC endpoints
+│   ├── kms/                  # KMS encryption keys
+│   ├── alb/                  # Internal ALB
+│   ├── apigw/                # API Gateway HTTP API + VPC Link
+│   ├── ecs-service/          # Reusable per-service (ECR, task def, TG, autoscaling)
+│   ├── rds-aurora/           # Aurora PostgreSQL Serverless v2
+│   ├── redis/                # ElastiCache Redis
+│   ├── opensearch/           # OpenSearch Serverless (optional)
+│   ├── eventbridge/          # EventBridge custom bus
+│   ├── sqs/                  # SQS queues + DLQs
+│   ├── lambda-worker/        # Lambda workers (optional)
+│   ├── s3-docs/              # S3 documents bucket
+│   ├── cognito/              # Cognito User Pool + clients
+│   ├── cloudfront/           # CloudFront distribution
+│   ├── waf/                  # WAF Web ACL (optional)
+│   └── observability/        # CloudWatch dashboard + alarms
 ├── envs/
-│   └── common/              # Shared module for all environments
-│       ├── main.tf          # VPC, subnets, NAT gateway
-│       ├── ecr.tf           # ECR repositories (api, web)
-│       ├── rds.tf           # PostgreSQL database
-│       ├── alb.tf           # Application Load Balancer
-│       ├── ecs-api.tf       # ECS cluster + API service
-│       ├── ecs-web.tf       # Web frontend service
-│       ├── iam.tf           # ECS task roles
-│       ├── security-groups.tf
-│       ├── storage.tf       # S3 + CloudFront
-│       ├── variables.tf
-│       └── outputs.tf
-├── environments/
-│   ├── dev/                 # Dev environment root
-│   ├── qa/                  # QA environment root
-│   ├── uat/                 # UAT environment root
-│   └── prod/                # Production environment root
-├── modules/                 # Legacy standalone modules
-└── bootstrap/               # Remote state bootstrap
+│   ├── dev/                  # Dev (CIDR: 10.110.0.0/16)
+│   ├── qa/                   # QA  (CIDR: 10.120.0.0/16)
+│   ├── uat/                  # UAT (CIDR: 10.130.0.0/16)
+│   └── prod/                 # Prod (CIDR: 10.140.0.0/16)
+├── bootstrap/                # Remote state S3/DynamoDB
+├── legacy-v1/                # Old code (reference only)
+├── .github/workflows/        # CI/CD
+├── architecture.mmd          # Mermaid diagram
+└── Makefile
 ```
+
+## Microservices
+
+10 ECS Fargate services, each with its own ECR repo, task definition, target group, and autoscaling:
+
+- **bff-gateway** - API composition + auth middleware (/api/*)
+- **auth-service** - Auth beyond Cognito (/internal/auth/*)
+- **lease-service** - Lease management (/internal/leases/*)
+- **property-service** - Property management (/internal/properties/*)
+- **tenant-service** - Tenant management (/internal/tenants/*)
+- **maintenance-service** - Work orders (/internal/maintenance/*)
+- **payments-service** - Stripe integration (/internal/payments/*)
+- **notification-service** - Notifications (/internal/notifications/*)
+- **document-service** - Document management (/internal/documents/*)
+- **reporting-service** - Async reports (/internal/reports/*)
 
 ## Prerequisites
 
 - Terraform >= 1.6.0
-- AWS CLI v2 configured with appropriate profiles
-- Access to target AWS accounts
+- AWS CLI v2 with profiles for each account
+- Docker (for building service images)
 
-## Quick Start
+## Quick Start (Deploy Dev v2)
 
-### 1. Initialize Backend (First Time Only)
+### 1. Bootstrap Remote State (first time)
 
 ```bash
-# Create S3 bucket and DynamoDB table for state
-./scripts/bootstrap_remote_state.sh \
-  --profile leasebase-dev \
-  --region us-west-2 \
-  --env dev \
-  --bucket-prefix leasebase-tfstate
+make bootstrap ENV=dev
 ```
 
 ### 2. Configure Backend
 
-Create `environments/dev/backend.hcl`:
-
-```hcl
-bucket         = "leasebase-tfstate-dev-ACCOUNT_ID"
-key            = "dev/terraform.tfstate"
-region         = "us-west-2"
-dynamodb_table = "leasebase-tfstate-lock-dev"
-encrypt        = true
+```bash
+cp envs/dev/backend.hcl.example envs/dev/backend.hcl
+# Edit backend.hcl with your account ID
 ```
 
-### 3. Create Variables File
-
-Create `environments/dev/dev.tfvars`:
-
-```hcl
-db_password = "your-secure-password"
-
-# Optional overrides
-# api_task_cpu    = 512
-# api_task_memory = 1024
-# api_desired_count = 2
-```
-
-### 4. Deploy
+### 3. Deploy
 
 ```bash
-cd environments/dev
-
-# Initialize
-terraform init -backend-config=backend.hcl
-
-# Plan
-terraform plan -var-file=dev.tfvars -out=dev.plan
-
-# Apply
-terraform apply dev.plan
+make init ENV=dev
+make plan ENV=dev
+make apply ENV=dev
 ```
 
-## Environments
-
-| Environment | VPC CIDR | Purpose |
-|-------------|----------|---------|
-| dev | 10.10.0.0/16 | Development |
-| qa | 10.20.0.0/16 | QA testing |
-| uat | 10.30.0.0/16 | User acceptance |
-| prod | 10.40.0.0/16 | Production |
-
-## Key Resources Created
-
-### Per Environment
-
-- **VPC** with public/private subnets across 2 AZs
-- **ECR Repositories**: `leasebase-{env}-api`, `leasebase-{env}-web`
-- **RDS PostgreSQL** instance (private subnet)
-- **Application Load Balancer** with path-based routing:
-  - `/api/*`, `/docs*`, `/healthz`, `/readyz` → API service
-  - `/*` → Web service
-- **ECS Fargate Cluster** with API and Web services
-- **S3 Bucket** for document storage
-- **CloudWatch Log Groups** for ECS tasks
-
-## CI/CD Integration
-
-### Deploying Backend (leasebase-api)
+### 4. View Outputs
 
 ```bash
-# Build and push to ECR
-aws ecr get-login-password --region us-west-2 | docker login --username AWS --password-stdin ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com
-docker build -t leasebase-dev-api .
-docker tag leasebase-dev-api:latest ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com/leasebase-dev-api:latest
-docker push ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com/leasebase-dev-api:latest
-
-# Force new deployment
-aws ecs update-service --cluster leasebase-dev-cluster --service leasebase-dev-api --force-new-deployment
+make output ENV=dev
 ```
-
-### Deploying Frontend (leasebase-web)
-
-```bash
-# Build and push to ECR
-docker build -t leasebase-dev-web .
-docker tag leasebase-dev-web:latest ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com/leasebase-dev-web:latest
-docker push ACCOUNT_ID.dkr.ecr.us-west-2.amazonaws.com/leasebase-dev-web:latest
-
-# Force new deployment
-aws ecs update-service --cluster leasebase-dev-cluster --service leasebase-dev-web --force-new-deployment
-```
-
-## Variables Reference
-
-### Required
-
-| Variable | Description |
-|----------|-------------|
-| `db_password` | RDS master password |
-
-### Optional (with defaults)
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `vpc_cidr` | 10.10.0.0/16 | VPC CIDR block |
-| `az_count` | 2 | Number of availability zones |
-| `enable_nat_gateway` | false | Enable NAT for private subnets |
-| `db_instance_class` | db.t3.micro | RDS instance type |
-| `api_task_cpu` | 256 | API task CPU units |
-| `api_task_memory` | 512 | API task memory (MB) |
-| `api_desired_count` | 1 | Number of API tasks |
-| `web_task_cpu` | 256 | Web task CPU units |
-| `web_task_memory` | 512 | Web task memory (MB) |
-| `web_desired_count` | 1 | Number of web tasks |
-| `acm_certificate_arn` | "" | ACM cert for HTTPS |
-
-## Outputs
-
-| Output | Description |
-|--------|-------------|
-| `alb_dns_name` | ALB DNS name for accessing the app |
-| `ecr_api_repository_url` | ECR URL for API images |
-| `ecr_web_repository_url` | ECR URL for web images |
-| `rds_endpoint` | Database connection endpoint |
-| `ecs_cluster_name` | ECS cluster name |
 
 ## Common Commands
 
 ```bash
-# Format all Terraform files
-terraform fmt -recursive
-
-# Validate without backend
-cd environments/dev
-terraform init -backend=false
-terraform validate
-
-# Destroy environment (use with caution)
-terraform destroy -var-file=dev.tfvars
+make plan ENV=dev          # Plan dev changes
+make apply ENV=dev         # Apply dev changes
+make validate              # Validate all envs
+make fmt                   # Format all TF code
+make lint                  # fmt-check + validate
+make clean                 # Remove .terraform dirs
 ```
 
-## Cost Optimization (Dev/QA)
+## Naming Convention
 
-The dev configuration uses cost-effective settings:
-- `db.t3.micro` RDS instance
-- No NAT Gateway (ECS in public subnets with public IPs)
-- Single NAT Gateway option when enabled
-- Minimal ECS task sizes (256 CPU, 512 MB)
-- 7-day log retention
+All resources: `leasebase-{env}-v2-*`
+Tags on every resource: `App=LeaseBase, Env={env}, Stack=v2, Owner=motart`
 
-For production, consider:
-- Larger RDS instance with Multi-AZ
-- NAT Gateway for private ECS tasks
-- Higher task CPU/memory
-- Longer log retention
-- Deletion protection enabled
+## VPC CIDRs
+
+- dev: 10.110.0.0/16
+- qa: 10.120.0.0/16
+- uat: 10.130.0.0/16
+- prod: 10.140.0.0/16
+
+(v1 used 10.10-40.0.0/16 — no overlap)
+
+## Cost Controls (Non-Prod)
+
+- Single NAT gateway (configurable)
+- Aurora Serverless v2 min 0.5 ACU
+- cache.t3.micro Redis
+- OpenSearch disabled by default
+- WAF disabled by default
+- FARGATE_SPOT default capacity provider
+
+## Migration / Cutover Plan
+
+1. Deploy v2 stack alongside v1 (separate VPC, separate resources)
+2. Push Docker images to v2 ECR repos
+3. Validate services via API Gateway endpoint
+4. Switch Route53/CloudFront to point to v2 API Gateway
+5. Monitor for 24-48h
+6. Decommission v1 stack (terraform destroy on legacy-v1 envs)
+
+## Rollback Plan
+
+1. Point Route53/CloudFront back to v1 ALB
+2. v2 stack remains running but unused
+3. Investigate and fix v2 issues
+4. Re-attempt cutover
+
+## CI/CD
+
+- **terraform-plan.yml** - Runs on PRs: fmt check, validate all envs, plan dev
+- **terraform-apply.yml** - Manual dispatch: plan + apply with prod approval gate
+- **docker-build-push.yml** - Build/push Docker images + trigger ECS deployment

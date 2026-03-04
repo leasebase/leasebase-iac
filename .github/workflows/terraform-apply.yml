@@ -1,0 +1,103 @@
+name: Terraform Apply
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy'
+        required: true
+        type: choice
+        options:
+          - dev
+          - qa
+          - uat
+          - prod
+      auto_approve:
+        description: 'Auto-approve (skip manual approval for non-prod)'
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  TF_VERSION: "1.6.0"
+
+jobs:
+  plan:
+    name: Plan (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    outputs:
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: us-west-2
+      - name: Terraform Init
+        working-directory: envs/${{ inputs.environment }}
+        run: terraform init
+      - name: Terraform Plan
+        id: plan
+        working-directory: envs/${{ inputs.environment }}
+        run: |
+          terraform plan -no-color -detailed-exitcode -out=${{ inputs.environment }}.tfplan || EC=$?
+          if [ "$EC" = "2" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          fi
+      - name: Upload Plan
+        if: steps.plan.outputs.has_changes == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan-${{ inputs.environment }}
+          path: envs/${{ inputs.environment }}/${{ inputs.environment }}.tfplan
+
+  approve:
+    name: Approve (${{ inputs.environment }})
+    needs: plan
+    if: needs.plan.outputs.has_changes == 'true' && inputs.environment == 'prod'
+    runs-on: ubuntu-latest
+    environment: prod-approval
+    steps:
+      - run: echo "Approved for production deployment"
+
+  apply:
+    name: Apply (${{ inputs.environment }})
+    needs: [plan, approve]
+    if: |
+      always() &&
+      needs.plan.outputs.has_changes == 'true' &&
+      (needs.approve.result == 'success' || inputs.environment != 'prod')
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: us-west-2
+      - name: Download Plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ inputs.environment }}
+          path: envs/${{ inputs.environment }}
+      - name: Terraform Init
+        working-directory: envs/${{ inputs.environment }}
+        run: terraform init
+      - name: Terraform Apply
+        working-directory: envs/${{ inputs.environment }}
+        run: terraform apply -auto-approve ${{ inputs.environment }}.tfplan

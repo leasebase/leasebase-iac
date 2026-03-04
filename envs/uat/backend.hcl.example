@@ -1,0 +1,5 @@
+bucket         = "leasebase-tfstate-ACCOUNT_ID"
+key            = "v2/uat/terraform.tfstate"
+region         = "us-west-2"
+dynamodb_table = "leasebase-terraform-locks"
+encrypt        = true
