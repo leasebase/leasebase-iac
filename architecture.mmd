@@ -1,0 +1,129 @@
+graph TB
+    subgraph "Internet"
+        Users[Users / Clients]
+    end
+
+    subgraph "AWS Edge"
+        R53[Route53 DNS]
+        CF[CloudFront CDN]
+        WAF[WAF - optional]
+    end
+
+    subgraph "AWS Region: us-west-2"
+        subgraph "API Layer"
+            APIGW[API Gateway HTTP API]
+            VPCLINK[VPC Link]
+        end
+
+        subgraph "VPC: leasebase-ENV-v2"
+            subgraph "Private Subnets"
+                ALB[Internal ALB]
+
+                subgraph "ECS Fargate Cluster"
+                    BFF[bff-gateway]
+                    AUTH[auth-service]
+                    LEASE[lease-service]
+                    PROP[property-service]
+                    TENANT[tenant-service]
+                    MAINT[maintenance-service]
+                    PAY[payments-service]
+                    NOTIF[notification-service]
+                    DOC[document-service]
+                    REPORT[reporting-service]
+                end
+
+                subgraph "Data Stores"
+                    AURORA[(Aurora PostgreSQL<br/>Serverless v2)]
+                    REDIS[(ElastiCache Redis)]
+                    OPENSEARCH[(OpenSearch<br/>- optional)]
+                end
+            end
+
+            subgraph "VPC Endpoints"
+                VPCE_ECR[ECR Endpoint]
+                VPCE_S3[S3 Gateway]
+                VPCE_SM[Secrets Manager]
+                VPCE_CW[CloudWatch Logs]
+                VPCE_SSM[SSM Endpoint]
+            end
+        end
+
+        subgraph "Async / Events"
+            EB[EventBridge Bus]
+            SQS_NOTIF[SQS: notifications]
+            SQS_DOC[SQS: document-processing]
+            SQS_RPT[SQS: reporting-jobs]
+            LAMBDA[Lambda Workers<br/>- optional]
+        end
+
+        subgraph "Auth"
+            COGNITO[Cognito User Pool]
+            COG_WEB[Web Client]
+            COG_MOB[Mobile Client]
+        end
+
+        subgraph "Storage"
+            S3_DOCS[S3 Documents<br/>KMS Encrypted]
+            ECR[ECR Repos<br/>10 services]
+        end
+
+        subgraph "Security"
+            KMS[KMS Keys]
+            SM[Secrets Manager]
+        end
+
+        subgraph "Observability"
+            CW_DASH[CloudWatch Dashboard]
+            CW_ALARMS[CloudWatch Alarms]
+            SNS[SNS Alarm Topic]
+        end
+    end
+
+    Users --> R53
+    R53 --> CF
+    CF --> WAF
+    WAF --> APIGW
+    CF -.-> APIGW
+    APIGW --> VPCLINK
+    VPCLINK --> ALB
+
+    ALB --> BFF
+    ALB --> AUTH
+    ALB --> LEASE
+    ALB --> PROP
+    ALB --> TENANT
+    ALB --> MAINT
+    ALB --> PAY
+    ALB --> NOTIF
+    ALB --> DOC
+    ALB --> REPORT
+
+    BFF --> AURORA
+    LEASE --> AURORA
+    PROP --> AURORA
+    TENANT --> AURORA
+    PAY --> AURORA
+
+    BFF --> REDIS
+    AUTH --> REDIS
+
+    BFF --> EB
+    EB --> SQS_NOTIF
+    EB --> SQS_DOC
+    EB --> SQS_RPT
+    SQS_NOTIF --> NOTIF
+    SQS_DOC --> DOC
+    SQS_RPT --> REPORT
+    SQS_RPT -.-> LAMBDA
+
+    COGNITO --> COG_WEB
+    COGNITO --> COG_MOB
+    BFF --> COGNITO
+
+    DOC --> S3_DOCS
+
+    AURORA --> KMS
+    S3_DOCS --> KMS
+    SM --> KMS
+
+    CW_ALARMS --> SNS

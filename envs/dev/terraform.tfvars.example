@@ -1,0 +1,30 @@
+# Dev Environment - terraform.tfvars
+# Copy to terraform.tfvars and adjust values
+
+aws_region = "us-west-2"
+
+# VPC
+vpc_cidr           = "10.110.0.0/16"
+az_count           = 2
+enable_nat_gateway = true
+single_nat_gateway = true  # Cost saving: single NAT for dev
+
+# TLS (leave empty to use HTTP only in dev)
+acm_certificate_arn           = ""
+cloudfront_acm_certificate_arn = ""
+
+# ECS
+log_retention_days = 7
+
+# Aurora Serverless v2
+db_name             = "leasebase"
+aurora_min_capacity = 0.5
+aurora_max_capacity = 4
+
+# Redis
+redis_node_type = "cache.t3.micro"
+
+# Feature flags (cost saving: disabled in dev)
+enable_opensearch     = false
+enable_waf            = false
+enable_lambda_workers = false

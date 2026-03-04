@@ -1,0 +1,65 @@
+################################################################################
+# CloudFront Module - LeaseBase v2
+# Distribution fronting API Gateway
+################################################################################
+
+resource "aws_cloudfront_distribution" "main" {
+  enabled             = true
+  is_ipv6_enabled     = true
+  comment             = "LeaseBase ${var.environment} v2"
+  default_root_object = ""
+  price_class         = var.price_class
+  aliases             = var.domain_aliases
+  web_acl_id          = var.web_acl_arn
+
+  # API Gateway origin
+  origin {
+    domain_name = replace(var.api_gateway_endpoint, "https://", "")
+    origin_id   = "apigw"
+
+    custom_origin_config {
+      http_port              = 80
+      https_port             = 443
+      origin_protocol_policy = "https-only"
+      origin_ssl_protocols   = ["TLSv1.2"]
+    }
+  }
+
+  default_cache_behavior {
+    allowed_methods  = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods   = ["GET", "HEAD"]
+    target_origin_id = "apigw"
+
+    forwarded_values {
+      query_string = true
+      headers      = ["Authorization", "Origin", "Accept", "Host"]
+
+      cookies {
+        forward = "all"
+      }
+    }
+
+    viewer_protocol_policy = "redirect-to-https"
+    min_ttl                = 0
+    default_ttl            = 0
+    max_ttl                = 0
+    compress               = true
+  }
+
+  restrictions {
+    geo_restriction {
+      restriction_type = "none"
+    }
+  }
+
+  viewer_certificate {
+    cloudfront_default_certificate = var.acm_certificate_arn == ""
+    acm_certificate_arn            = var.acm_certificate_arn != "" ? var.acm_certificate_arn : null
+    ssl_support_method             = var.acm_certificate_arn != "" ? "sni-only" : null
+    minimum_protocol_version       = var.acm_certificate_arn != "" ? "TLSv1.2_2021" : null
+  }
+
+  tags = merge(var.common_tags, {
+    Name = "${var.name_prefix}-cdn"
+  })
+}

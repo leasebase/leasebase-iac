@@ -1,0 +1,88 @@
+name: Docker Build & Push
+
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: 'Service to build'
+        required: true
+        type: choice
+        options:
+          - bff-gateway
+          - auth-service
+          - lease-service
+          - property-service
+          - tenant-service
+          - maintenance-service
+          - payments-service
+          - notification-service
+          - document-service
+          - reporting-service
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - qa
+          - uat
+          - prod
+      image_tag:
+        description: 'Image tag (default: git SHA)'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build-push:
+    name: Build & Push ${{ inputs.service }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    env:
+      ECR_REPO: leasebase-${{ inputs.environment }}-v2-${{ inputs.service }}
+      IMAGE_TAG: ${{ inputs.image_tag || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: us-west-2
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & Push
+        run: |
+          FULL_IMAGE="${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO }}:${{ env.IMAGE_TAG }}"
+          docker build -t $FULL_IMAGE .
+          docker push $FULL_IMAGE
+          docker tag $FULL_IMAGE "${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO }}:latest"
+          docker push "${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPO }}:latest"
+          echo "Image pushed: $FULL_IMAGE"
+
+  deploy:
+    name: Deploy ${{ inputs.service }}
+    needs: build-push
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_ROLE_ARN }}
+          aws-region: us-west-2
+
+      - name: Force New Deployment
+        run: |
+          aws ecs update-service \
+            --cluster leasebase-${{ inputs.environment }}-v2-cluster \
+            --service leasebase-${{ inputs.environment }}-v2-${{ inputs.service }} \
+            --force-new-deployment
+          echo "Deployment triggered for ${{ inputs.service }} in ${{ inputs.environment }}"

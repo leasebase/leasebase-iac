@@ -1,150 +1,156 @@
-# leasebase-iac
+# LeaseBase Infrastructure as Code (v2)
 
-Infrastructure-as-code (Terraform) and CI/CD workflows for deploying Leasebase to a multi-account AWS setup.
+Terraform-based microservices infrastructure for LeaseBase on AWS.
 
-- **Accounts/environments**: `leasebase-dev`, `leasebase-qa`, `leasebase-uat`, `leasebase-prod`
-- **Primary region**: `us-west-2` (application, RDS, Cognito, ALB, ECS)
-- **Edge region**: `us-east-1` (CloudFront + ACM for web certificates)
+## Architecture
 
-This repo manages:
+See `architecture.mmd` for the full Mermaid diagram. Key components:
 
-- VPC, subnets, NAT, and networking
-- ECS cluster + services for `leasebase-api` and `leasebase-web`
-- ECR repositories for API and web containers
-- Application Load Balancer (ALB) for API + web
-- RDS PostgreSQL (private)
-- S3 document bucket (private)
-- Cognito User Pool, App Client, and hosted domain
-- SES identities and basic configuration
-- Secrets Manager parameters for credentials and keys
-- CloudWatch log groups
-- CloudFront distribution for the web application
-- Route53 records and ACM certificates
-- Remote Terraform state (S3 + DynamoDB per account)
-- GitHub Actions CI/CD workflows
+- **Edge**: Route53 -> CloudFront -> (optional WAF) -> API Gateway HTTP API
+- **API Layer**: API Gateway -> VPC Link -> internal ALB -> ECS Fargate services
+- **Compute**: 10 ECS Fargate microservices in private subnets (no public IPs)
+- **Data**: Aurora PostgreSQL Serverless v2, ElastiCache Redis, OpenSearch (optional)
+- **Async**: EventBridge bus + SQS queues (notifications, document-processing, reporting)
+- **Auth**: Cognito User Pool with web + mobile clients
+- **Storage**: S3 documents bucket (KMS-encrypted, lifecycle policies)
+- **Security**: KMS keys, Secrets Manager, least-privilege IAM, tight SGs
+- **Observability**: CloudWatch dashboard, alarms, SNS topic
 
-See `docs/` for detailed usage.
+## Directory Structure
 
----
-
-## Deploying to each environment
-
-Detailed CI/CD and account bootstrap docs live in:
-
-- `docs/ACCOUNT_BOOTSTRAP.md` – how to prepare each AWS account (remote state, GitHub OIDC roles, DNS patterns).
-- `docs/DEPLOYMENT.md` – how GitHub Actions deploys to `dev`, `qa`, `uat`, `prod`, and how to run Terraform locally.
-
-Below is a concise "how to deploy" summary per environment.
-
-### Prerequisites (all environments)
-
-- Terraform **1.6+** installed.
-- AWS CLI v2 installed.
-- AWS profiles configured for each account:
-  - `leasebase-dev`
-  - `leasebase-qa`
-  - `leasebase-uat`
-  - `leasebase-prod`
-- Remote state S3 bucket + DynamoDB table created for each account using `scripts/bootstrap_remote_state.sh` (see `docs/ACCOUNT_BOOTSTRAP.md`).
-- Example `*.tfvars.example` files copied to real `*.tfvars` and filled out (non-secret values):
-
-```bash
-cd envs/dev
-cp dev.tfvars.example dev.tfvars
-# edit dev.tfvars
+```
+leasebase-iac/
+├── modules/                  # v2 Terraform modules
+│   ├── vpc/                  # VPC, subnets, NAT GWs, VPC endpoints
+│   ├── kms/                  # KMS encryption keys
+│   ├── alb/                  # Internal ALB
+│   ├── apigw/                # API Gateway HTTP API + VPC Link
+│   ├── ecs-service/          # Reusable per-service (ECR, task def, TG, autoscaling)
+│   ├── rds-aurora/           # Aurora PostgreSQL Serverless v2
+│   ├── redis/                # ElastiCache Redis
+│   ├── opensearch/           # OpenSearch Serverless (optional)
+│   ├── eventbridge/          # EventBridge custom bus
+│   ├── sqs/                  # SQS queues + DLQs
+│   ├── lambda-worker/        # Lambda workers (optional)
+│   ├── s3-docs/              # S3 documents bucket
+│   ├── cognito/              # Cognito User Pool + clients
+│   ├── cloudfront/           # CloudFront distribution
+│   ├── waf/                  # WAF Web ACL (optional)
+│   └── observability/        # CloudWatch dashboard + alarms
+├── envs/
+│   ├── dev/                  # Dev (CIDR: 10.110.0.0/16)
+│   ├── qa/                   # QA  (CIDR: 10.120.0.0/16)
+│   ├── uat/                  # UAT (CIDR: 10.130.0.0/16)
+│   └── prod/                 # Prod (CIDR: 10.140.0.0/16)
+├── bootstrap/                # Remote state S3/DynamoDB
+├── legacy-v1/                # Old code (reference only)
+├── .github/workflows/        # CI/CD
+├── architecture.mmd          # Mermaid diagram
+└── Makefile
 ```
 
-Secrets (DB passwords, Stripe keys, JWT secrets, etc.) are **not** stored in tfvars. They are provisioned via Terraform into **Secrets Manager / SSM** and populated out-of-band.
+## Microservices
 
-### Dev environment (`envs/dev`, account `leasebase-dev`)
+10 ECS Fargate services, each with its own ECR repo, task definition, target group, and autoscaling:
 
-**Local Terraform (optional):**
+- **bff-gateway** - API composition + auth middleware (/api/*)
+- **auth-service** - Auth beyond Cognito (/internal/auth/*)
+- **lease-service** - Lease management (/internal/leases/*)
+- **property-service** - Property management (/internal/properties/*)
+- **tenant-service** - Tenant management (/internal/tenants/*)
+- **maintenance-service** - Work orders (/internal/maintenance/*)
+- **payments-service** - Stripe integration (/internal/payments/*)
+- **notification-service** - Notifications (/internal/notifications/*)
+- **document-service** - Document management (/internal/documents/*)
+- **reporting-service** - Async reports (/internal/reports/*)
 
-```bash
-cd envs/dev
-export AWS_PROFILE=leasebase-dev
+## Prerequisites
 
-# One-time (after remote state is configured)
-terraform init
+- Terraform >= 1.6.0
+- AWS CLI v2 with profiles for each account
+- Docker (for building service images)
 
-# Plan and apply using your dev.tfvars
-terraform plan -var-file="dev.tfvars" -out dev.plan
-terraform apply dev.plan
-```
+## Quick Start (Deploy Dev v2)
 
-**Via GitHub Actions (primary path):**
-
-- Pushing to `main` in this repo triggers the `deploy-dev` workflow (see `docs/DEPLOYMENT.md`).
-- The workflow will:
-  - Assume `AWS_DEV_ROLE_ARN` via OIDC.
-  - Build and push Docker images for `leasebase-api` and `leasebase-web`.
-  - Run `terraform init/plan/apply` in `envs/dev`.
-  - Run Prisma DB migrations via an ECS one-off task.
-
-### QA environment (`envs/qa`, account `leasebase-qa`)
-
-**Local Terraform:**
+### 1. Bootstrap Remote State (first time)
 
 ```bash
-cd envs/qa
-export AWS_PROFILE=leasebase-qa
-
-terraform init
-terraform plan -var-file="qa.tfvars" -out qa.plan
-terraform apply qa.plan
+make bootstrap ENV=dev
 ```
 
-**Via GitHub Actions:**
-
-- Use the "Deploy QA" workflow in the **Actions** tab.
-- Manually trigger it (`workflow_dispatch`), select the commit/branch to deploy.
-- The workflow assumes `AWS_QA_ROLE_ARN`, builds/pushes images, applies Terraform in `envs/qa`, and runs migrations.
-
-### UAT environment (`envs/uat`, account `leasebase-uat`)
-
-**Local Terraform:**
+### 2. Configure Backend
 
 ```bash
-cd envs/uat
-export AWS_PROFILE=leasebase-uat
-
-terraform init
-terraform plan -var-file="uat.tfvars" -out uat.plan
-terraform apply uat.plan
+cp envs/dev/backend.hcl.example envs/dev/backend.hcl
+# Edit backend.hcl with your account ID
 ```
 
-**Via GitHub Actions:**
-
-- Use the "Deploy UAT" workflow.
-- Trigger it manually, choose the commit/branch.
-- The workflow assumes `AWS_UAT_ROLE_ARN`, builds/pushes images, applies Terraform in `envs/uat`, and runs migrations.
-
-### Prod environment (`envs/prod`, account `leasebase-prod`)
-
-**Local Terraform (with extra care):**
+### 3. Deploy
 
 ```bash
-cd envs/prod
-export AWS_PROFILE=leasebase-prod
-
-terraform init
-terraform plan -var-file="prod.tfvars" -out prod.plan
-# Carefully review the plan before applying
-terraform apply prod.plan
+make init ENV=dev
+make plan ENV=dev
+make apply ENV=dev
 ```
 
-**Via GitHub Actions (recommended):**
+### 4. View Outputs
 
-- Use the "Deploy Prod" workflow.
-- It is typically protected by GitHub **environments** (manual approvals, reviewers).
-- The workflow assumes `AWS_PROD_ROLE_ARN`, builds/pushes images, applies Terraform in `envs/prod`, and runs migrations.
+```bash
+make output ENV=dev
+```
 
-### Notes on rollbacks and troubleshooting
+## Common Commands
 
-- To rollback infrastructure:
-  - Identify a known-good commit.
-  - Re-run the relevant deploy workflow pointing at that commit, or check out that commit locally and re-run `terraform apply` with the same tfvars (see `docs/DEPLOYMENT.md` §7).
-- To rollback application images:
-  - Pick previous image tags in ECR for `leasebase-api` and `leasebase-web`.
-  - Pin those tags via tfvars/variables or workflow inputs and redeploy.
-- Secret rotation and sensitive changes are covered in `docs/DEPLOYMENT.md` §8.
+```bash
+make plan ENV=dev          # Plan dev changes
+make apply ENV=dev         # Apply dev changes
+make validate              # Validate all envs
+make fmt                   # Format all TF code
+make lint                  # fmt-check + validate
+make clean                 # Remove .terraform dirs
+```
+
+## Naming Convention
+
+All resources: `leasebase-{env}-v2-*`
+Tags on every resource: `App=LeaseBase, Env={env}, Stack=v2, Owner=motart`
+
+## VPC CIDRs
+
+- dev: 10.110.0.0/16
+- qa: 10.120.0.0/16
+- uat: 10.130.0.0/16
+- prod: 10.140.0.0/16
+
+(v1 used 10.10-40.0.0/16 — no overlap)
+
+## Cost Controls (Non-Prod)
+
+- Single NAT gateway (configurable)
+- Aurora Serverless v2 min 0.5 ACU
+- cache.t3.micro Redis
+- OpenSearch disabled by default
+- WAF disabled by default
+- FARGATE_SPOT default capacity provider
+
+## Migration / Cutover Plan
+
+1. Deploy v2 stack alongside v1 (separate VPC, separate resources)
+2. Push Docker images to v2 ECR repos
+3. Validate services via API Gateway endpoint
+4. Switch Route53/CloudFront to point to v2 API Gateway
+5. Monitor for 24-48h
+6. Decommission v1 stack (terraform destroy on legacy-v1 envs)
+
+## Rollback Plan
+
+1. Point Route53/CloudFront back to v1 ALB
+2. v2 stack remains running but unused
+3. Investigate and fix v2 issues
+4. Re-attempt cutover
+
+## CI/CD
+
+- **terraform-plan.yml** - Runs on PRs: fmt check, validate all envs, plan dev
+- **terraform-apply.yml** - Manual dispatch: plan + apply with prod approval gate
+- **docker-build-push.yml** - Build/push Docker images + trigger ECS deployment

@@ -1,0 +1,26 @@
+# Dev Environment Variables
+# Copy this to terraform.tfvars and adjust as needed
+
+aws_region = "us-west-2"
+
+# VPC Configuration
+vpc_cidr             = "10.10.0.0/16"
+availability_zones   = ["us-west-2a", "us-west-2b"]
+public_subnet_cidrs  = ["10.10.1.0/24", "10.10.2.0/24"]
+private_subnet_cidrs = ["10.10.10.0/24", "10.10.11.0/24"]
+
+# Optional features (cost-saving defaults for dev)
+enable_nat_gateway    = false  # Set to true if private subnets need internet access
+enable_vpc_flow_logs  = false  # Set to true for network debugging
+enable_vpc_endpoints  = false  # Set to true if you need private ECR/SSM access
+
+# IAM Configuration
+management_account_id = "MANAGEMENT_ACCOUNT_ID"  # Account that can assume terraform role
+terraform_external_id = "leasebase-terraform-dev"
+
+# Tags
+tags = {
+  Project     = "LeaseBase"
+  Environment = "dev"
+  ManagedBy   = "Terraform"
+}

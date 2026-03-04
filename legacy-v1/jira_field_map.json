@@ -1,0 +1,11 @@
+{
+  "domain": "leasebase.atlassian.net",
+  "project_key": "LBB",
+  "project_name": "LeaseBase - Backend",
+  "project_style": "next-gen",
+  "user_display_name": "Rachid Abadli",
+  "user_account_id": "712020:e64f0930-0a3f-4bc8-b1b1-417389b19546",
+  "epic_name_field_id": null,
+  "epic_link_field_id": null,
+  "parent_link_field_id": "parent"
+}

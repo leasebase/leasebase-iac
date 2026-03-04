@@ -1,0 +1,10 @@
+# Backend configuration for Production environment
+# Copy this to backend.hcl and fill in your account-specific values
+#
+# Usage: terraform init -backend-config=backend.hcl
+
+bucket         = "leasebase-tfstate-ACCOUNT_ID"
+key            = "prod/foundation.tfstate"
+region         = "us-west-2"
+dynamodb_table = "leasebase-terraform-locks"
+encrypt        = true
