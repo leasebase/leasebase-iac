@@ -122,17 +122,17 @@ variable "github_oidc_repositories" {
   description = "GitHub repos allowed to assume the CI/CD role (format: org/repo)"
   type        = list(string)
   default = [
-    "motart/leasebase_all",
-    "motart/leasebase-auth-service",
-    "motart/leasebase-bff-gateway",
-    "motart/leasebase-lease-service",
-    "motart/leasebase-property-service",
-    "motart/leasebase-tenant-service",
-    "motart/leasebase-maintenance-service",
-    "motart/leasebase-payments-service",
-    "motart/leasebase-notification-service",
-    "motart/leasebase-document-service",
-    "motart/leasebase-reporting-service",
+    "leasebase/leasebase_all",
+    "leasebase/leasebase-auth-service",
+    "leasebase/leasebase-bff-gateway",
+    "leasebase/leasebase-lease-service",
+    "leasebase/leasebase-property-service",
+    "leasebase/leasebase-tenant-service",
+    "leasebase/leasebase-maintenance-service",
+    "leasebase/leasebase-payments-service",
+    "leasebase/leasebase-notification-service",
+    "leasebase/leasebase-document-service",
+    "leasebase/leasebase-reporting-service",
   ]
 }
 
