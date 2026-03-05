@@ -38,6 +38,19 @@ locals {
     ManagedBy = "Terraform"
   }
 
+  # ── Cognito env vars shared by all services ──────────────────────────────
+  cognito_env = [
+    { name = "COGNITO_USER_POOL_ID", value = module.cognito.user_pool_id },
+    { name = "COGNITO_WEB_CLIENT_ID", value = module.cognito.web_client_id },
+    { name = "COGNITO_REGION", value = var.aws_region },
+    { name = "JWKS_URI", value = "https://cognito-idp.${var.aws_region}.amazonaws.com/${module.cognito.user_pool_id}/.well-known/jwks.json" },
+  ]
+
+  # ── Redis env var shared by services that need caching ───────────────────
+  redis_env = [
+    { name = "REDIS_URL", value = "redis://${module.redis.primary_endpoint}:${module.redis.port}" },
+  ]
+
   services = {
     bff-gateway = {
       port              = 3000
@@ -129,6 +142,80 @@ locals {
       path_patterns     = ["/internal/reports/*"]
       priority          = 190
     }
+  }
+
+  # ── Per-service extra environment variables ──────────────────────────────
+  service_extra_env = {
+    bff-gateway          = local.cognito_env
+    auth-service         = local.cognito_env
+    property-service     = concat(local.cognito_env, local.redis_env)
+    lease-service        = concat(local.cognito_env, local.redis_env)
+    tenant-service       = concat(local.cognito_env, local.redis_env)
+    maintenance-service  = concat(local.cognito_env, local.redis_env)
+    payments-service     = concat(local.cognito_env, local.redis_env)
+    notification-service = concat(local.cognito_env, [
+      { name = "SQS_QUEUE_URL", value = module.sqs.queue_urls["notifications"] },
+    ])
+    document-service = concat(local.cognito_env, [
+      { name = "S3_DOCUMENTS_BUCKET", value = module.s3_docs.bucket_name },
+      { name = "SQS_QUEUE_URL", value = module.sqs.queue_urls["document-processing"] },
+    ])
+    reporting-service = concat(local.cognito_env, [
+      { name = "SQS_QUEUE_URL", value = module.sqs.queue_urls["reporting-jobs"] },
+    ])
+  }
+
+  # ── Per-service DB secret references ────────────────────────────────────
+  # Maps service names that need DB access to their Secrets Manager secret ARN
+  service_db_secret_map = {
+    property-service     = "property"
+    lease-service        = "lease"
+    tenant-service       = "tenant"
+    maintenance-service  = "maintenance"
+    payments-service     = "payments"
+    notification-service = "notification"
+    document-service     = "document"
+    reporting-service    = "reporting"
+  }
+
+  service_secrets = {
+    for svc, schema_key in local.service_db_secret_map : svc => [
+      { name = "DATABASE_SECRET_ARN", valueFrom = module.database_platform.service_secret_arns[schema_key] },
+    ]
+  }
+
+  # ── Per-service IAM statements ──────────────────────────────────────────
+  service_extra_iam = {
+    document-service = [
+      {
+        Sid      = "S3DocumentAccess"
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
+        Resource = [module.s3_docs.bucket_arn, "${module.s3_docs.bucket_arn}/*"]
+      },
+      {
+        Sid      = "SQSSendDocProcessing"
+        Effect   = "Allow"
+        Action   = ["sqs:SendMessage"]
+        Resource = [module.sqs.queue_arns["document-processing"]]
+      },
+    ]
+    notification-service = [
+      {
+        Sid      = "SQSSendNotifications"
+        Effect   = "Allow"
+        Action   = ["sqs:SendMessage"]
+        Resource = [module.sqs.queue_arns["notifications"]]
+      },
+    ]
+    reporting-service = [
+      {
+        Sid      = "SQSSendReportingJobs"
+        Effect   = "Allow"
+        Action   = ["sqs:SendMessage"]
+        Resource = [module.sqs.queue_arns["reporting-jobs"]]
+      },
+    ]
   }
 }
 
@@ -288,27 +375,10 @@ module "services" {
   log_retention_days    = var.log_retention_days
   execution_role_arn    = aws_iam_role.ecs_execution.arn
   ecr_force_delete      = true
+  extra_environment     = lookup(local.service_extra_env, each.key, [])
+  secrets               = lookup(local.service_secrets, each.key, [])
+  extra_iam_statements  = lookup(local.service_extra_iam, each.key, [])
   common_tags           = local.common_tags
-}
-
-################################################################################
-# RDS Aurora Serverless v2
-################################################################################
-
-module "rds" {
-  source                     = "../../modules/rds-aurora"
-  environment                = local.environment
-  name_prefix                = local.name_prefix
-  vpc_id                     = module.vpc.vpc_id
-  subnet_ids                 = module.vpc.private_subnet_ids
-  allowed_security_group_ids = [for s in module.services : s.security_group_id]
-  kms_key_id                 = module.kms.key_arn
-  db_name                    = var.db_name
-  min_capacity               = var.aurora_min_capacity
-  max_capacity               = var.aurora_max_capacity
-  deletion_protection        = false
-  skip_final_snapshot        = true
-  common_tags                = local.common_tags
 }
 
 ################################################################################
@@ -321,7 +391,7 @@ module "database_platform" {
   name_prefix            = local.name_prefix
   vpc_id                 = module.vpc.vpc_id
   private_subnet_ids     = module.vpc.private_subnet_ids
-  ecs_security_group_ids = [for s in module.services : s.security_group_id]
+  ecs_security_group_ids = [] # SG rules created externally to avoid for_each cycle
   kms_key_id             = module.kms.key_arn
   kms_key_arn            = module.kms.key_arn
   database_name          = var.db_name
@@ -343,9 +413,49 @@ module "redis" {
   name_prefix                = local.name_prefix
   vpc_id                     = module.vpc.vpc_id
   subnet_ids                 = module.vpc.private_subnet_ids
-  allowed_security_group_ids = [for s in module.services : s.security_group_id]
+  allowed_security_group_ids = [] # SG rules created externally to avoid for_each cycle
   node_type                  = var.redis_node_type
   common_tags                = local.common_tags
+}
+
+# ── External SG rules (avoid cycle: services ↔ redis/database_platform) ──────
+# module.services SG IDs can't be passed into modules that feed back into
+# services (via extra_environment), so we wire access here as standalone rules.
+
+resource "aws_security_group_rule" "redis_from_services" {
+  for_each = module.services
+
+  type                     = "ingress"
+  description              = "Redis from ${each.key}"
+  from_port                = 6379
+  to_port                  = 6379
+  protocol                 = "tcp"
+  security_group_id        = module.redis.security_group_id
+  source_security_group_id = each.value.security_group_id
+}
+
+resource "aws_security_group_rule" "db_from_services" {
+  for_each = module.services
+
+  type                     = "ingress"
+  description              = "PostgreSQL from ${each.key}"
+  from_port                = 5432
+  to_port                  = 5432
+  protocol                 = "tcp"
+  security_group_id        = module.database_platform.db_security_group_id
+  source_security_group_id = each.value.security_group_id
+}
+
+resource "aws_security_group_rule" "db_proxy_from_services" {
+  for_each = module.services
+
+  type                     = "ingress"
+  description              = "PostgreSQL via Proxy from ${each.key}"
+  from_port                = 5432
+  to_port                  = 5432
+  protocol                 = "tcp"
+  security_group_id        = module.database_platform.proxy_security_group_id
+  source_security_group_id = each.value.security_group_id
 }
 
 ################################################################################
