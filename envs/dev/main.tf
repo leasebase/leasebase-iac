@@ -142,6 +142,15 @@ locals {
       path_patterns     = ["/internal/reports/*"]
       priority          = 190
     }
+    web = {
+      port              = 3000
+      cpu               = 256
+      memory            = 512
+      desired_count     = 1
+      health_check_path = "/"
+      path_patterns     = ["/*"]
+      priority          = 500
+    }
   }
 
   # ── Per-service extra environment variables ──────────────────────────────
@@ -162,6 +171,9 @@ locals {
     ])
     reporting-service = concat(local.cognito_env, [
       { name = "SQS_QUEUE_URL", value = module.sqs.queue_urls["reporting-jobs"] },
+    ])
+    web = concat(local.cognito_env, [
+      { name = "API_BASE_URL", value = "http://${module.alb.alb_dns_name}" },
     ])
   }
 

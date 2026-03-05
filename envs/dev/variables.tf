@@ -123,16 +123,7 @@ variable "github_oidc_repositories" {
   type        = list(string)
   default = [
     "leasebase/leasebase_all",
-    "leasebase/leasebase-auth-service",
-    "leasebase/leasebase-bff-gateway",
-    "leasebase/leasebase-lease-service",
-    "leasebase/leasebase-property-service",
-    "leasebase/leasebase-tenant-service",
-    "leasebase/leasebase-maintenance-service",
-    "leasebase/leasebase-payments-service",
-    "leasebase/leasebase-notification-service",
-    "leasebase/leasebase-document-service",
-    "leasebase/leasebase-reporting-service",
+    "leasebase/leasebase-*",
   ]
 }
 
