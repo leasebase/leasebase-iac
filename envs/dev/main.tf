@@ -322,7 +322,7 @@ module "database_platform" {
   vpc_id                 = module.vpc.vpc_id
   private_subnet_ids     = module.vpc.private_subnet_ids
   ecs_security_group_ids = [for s in module.services : s.security_group_id]
-  kms_key_id             = module.kms.key_id
+  kms_key_id             = module.kms.key_arn
   kms_key_arn            = module.kms.key_arn
   database_name          = var.db_name
   instance_count         = 1 # single instance in dev for cost savings
@@ -433,8 +433,31 @@ module "cloudfront" {
   name_prefix          = local.name_prefix
   api_gateway_endpoint = module.apigw.api_endpoint
   acm_certificate_arn  = var.cloudfront_acm_certificate_arn
+  domain_aliases       = var.cloudfront_acm_certificate_arn != "" ? [var.domain_name] : []
   web_acl_arn          = module.waf.web_acl_arn
   common_tags          = local.common_tags
+}
+
+################################################################################
+# Route53 - dev.leasebase.co → CloudFront
+################################################################################
+
+data "aws_route53_zone" "main" {
+  count = var.domain_name != "" ? 1 : 0
+  name  = var.root_domain_name
+}
+
+resource "aws_route53_record" "web" {
+  count   = var.domain_name != "" ? 1 : 0
+  zone_id = data.aws_route53_zone.main[0].zone_id
+  name    = var.domain_name
+  type    = "A"
+
+  alias {
+    name                   = module.cloudfront.distribution_domain_name
+    zone_id                = module.cloudfront.distribution_hosted_zone_id
+    evaluate_target_health = false
+  }
 }
 
 ################################################################################
