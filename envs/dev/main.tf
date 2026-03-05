@@ -302,7 +302,7 @@ module "rds" {
   vpc_id                     = module.vpc.vpc_id
   subnet_ids                 = module.vpc.private_subnet_ids
   allowed_security_group_ids = [for s in module.services : s.security_group_id]
-  kms_key_id                 = module.kms.key_id
+  kms_key_id                 = module.kms.key_arn
   db_name                    = var.db_name
   min_capacity               = var.aurora_min_capacity
   max_capacity               = var.aurora_max_capacity
