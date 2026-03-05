@@ -170,6 +170,7 @@ resource "aws_security_group" "service" {
   }
 }
 
+
 ################################################################################
 # Target Group + Listener Rule
 ################################################################################
@@ -304,6 +305,15 @@ resource "aws_ecs_service" "main" {
     target_group_arn = aws_lb_target_group.main.arn
     container_name   = var.name
     container_port   = var.container_port
+  }
+
+  dynamic "load_balancer" {
+    for_each = var.additional_target_group_arns
+    content {
+      target_group_arn = load_balancer.value
+      container_name   = var.name
+      container_port   = var.container_port
+    }
   }
 
   deployment_circuit_breaker {

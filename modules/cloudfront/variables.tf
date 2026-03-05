@@ -42,3 +42,9 @@ variable "common_tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "web_alb_dns_name" {
+  description = "DNS name of the public-facing web ALB (bypasses API Gateway for web traffic)"
+  type        = string
+  default     = ""
+}

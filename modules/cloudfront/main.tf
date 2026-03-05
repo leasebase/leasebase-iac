@@ -23,7 +23,31 @@ data "aws_cloudfront_origin_request_policy" "all_viewer_except_host" {
   name = "Managed-AllViewerExceptHostHeader"
 }
 
-# ── Security response headers ────────────────────────────────────────────────
+# ── Custom origin request policy for web default behavior ─────────────────────
+# Forwards only what Next.js needs: Host (correct hostname in middleware),
+# CloudFront-Forwarded-Proto (protocol detection), all query strings (routing),
+# and all cookies (auth tokens). Avoids leaking unnecessary viewer headers.
+resource "aws_cloudfront_origin_request_policy" "web_default" {
+  name    = "${var.name_prefix}-web-default-orp"
+  comment = "Minimal ORP for web default behavior (/* → web ALB)"
+
+  headers_config {
+    header_behavior = "whitelist"
+    headers {
+      items = ["Host", "CloudFront-Forwarded-Proto"]
+    }
+  }
+
+  query_strings_config {
+    query_string_behavior = "all"
+  }
+
+  cookies_config {
+    cookie_behavior = "all"
+  }
+}
+
+# ── Security response headers
 
 resource "aws_cloudfront_response_headers_policy" "security" {
   name    = "${var.name_prefix}-security-headers"
@@ -79,30 +103,76 @@ resource "aws_cloudfront_distribution" "main" {
     }
   }
 
+  # Public web ALB origin (bypasses API Gateway for web traffic)
+  dynamic "origin" {
+    for_each = var.web_alb_dns_name != "" ? [var.web_alb_dns_name] : []
+    content {
+      domain_name = origin.value
+      origin_id   = "web-alb"
+
+      custom_origin_config {
+        http_port              = 80
+        https_port             = 443
+        origin_protocol_policy = "http-only"
+        origin_ssl_protocols   = ["TLSv1.2"]
+      }
+    }
+  }
+
   # ── Next.js immutable static assets (/_next/static/*) ──────────────────────
   # These are content-hashed and never change; cache for the maximum duration.
   ordered_cache_behavior {
     path_pattern     = "/_next/static/*"
     allowed_methods  = ["GET", "HEAD"]
     cached_methods   = ["GET", "HEAD"]
-    target_origin_id = "apigw"
+    target_origin_id = var.web_alb_dns_name != "" ? "web-alb" : "apigw"
 
     cache_policy_id            = data.aws_cloudfront_cache_policy.caching_optimized.id
+    origin_request_policy_id   = data.aws_cloudfront_origin_request_policy.all_viewer_except_host.id
     compress                   = true
     viewer_protocol_policy     = "redirect-to-https"
     response_headers_policy_id = aws_cloudfront_response_headers_policy.security.id
   }
 
-  # ── Default behavior (HTML, API, everything else) ──────────────────────────
-  # No CloudFront caching — prevents stale HTML after deploys.
-  # Origin may send s-maxage, but CachingDisabled forces TTL=0 at the edge.
-  default_cache_behavior {
+  # ── API routes → API Gateway ────────────────────────────────────────────────
+  ordered_cache_behavior {
+    path_pattern     = "/api/*"
     allowed_methods  = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
     cached_methods   = ["GET", "HEAD"]
     target_origin_id = "apigw"
 
     cache_policy_id            = data.aws_cloudfront_cache_policy.caching_disabled.id
     origin_request_policy_id   = data.aws_cloudfront_origin_request_policy.all_viewer_except_host.id
+    compress                   = true
+    viewer_protocol_policy     = "redirect-to-https"
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.security.id
+  }
+
+  # ── Health check → API Gateway ──────────────────────────────────────────────
+  ordered_cache_behavior {
+    path_pattern     = "/health"
+    allowed_methods  = ["GET", "HEAD"]
+    cached_methods   = ["GET", "HEAD"]
+    target_origin_id = "apigw"
+
+    cache_policy_id            = data.aws_cloudfront_cache_policy.caching_disabled.id
+    origin_request_policy_id   = data.aws_cloudfront_origin_request_policy.all_viewer_except_host.id
+    compress                   = true
+    viewer_protocol_policy     = "redirect-to-https"
+    response_headers_policy_id = aws_cloudfront_response_headers_policy.security.id
+  }
+
+  # ── Default behavior (web HTML pages) ──────────────────────────────────────
+  # No CloudFront caching — prevents stale HTML after deploys.
+  # When web ALB is set, uses AllViewer policy to forward Host header so Next.js
+  # middleware sees the correct hostname (dev.leasebase.co, not the ALB DNS).
+  default_cache_behavior {
+    allowed_methods  = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods   = ["GET", "HEAD"]
+    target_origin_id = var.web_alb_dns_name != "" ? "web-alb" : "apigw"
+
+    cache_policy_id            = data.aws_cloudfront_cache_policy.caching_disabled.id
+    origin_request_policy_id   = var.web_alb_dns_name != "" ? aws_cloudfront_origin_request_policy.web_default.id : data.aws_cloudfront_origin_request_policy.all_viewer_except_host.id
     compress                   = true
     viewer_protocol_policy     = "redirect-to-https"
     response_headers_policy_id = aws_cloudfront_response_headers_policy.security.id

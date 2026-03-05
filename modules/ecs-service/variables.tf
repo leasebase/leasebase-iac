@@ -152,3 +152,10 @@ variable "common_tags" {
   type        = map(string)
   default     = {}
 }
+
+variable "additional_target_group_arns" {
+  description = "Additional target group ARNs for the ECS service (e.g. public web ALB)"
+  type        = list(string)
+  default     = []
+}
+
