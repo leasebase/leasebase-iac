@@ -155,7 +155,10 @@ locals {
 
   # ── Per-service extra environment variables ──────────────────────────────
   service_extra_env = {
-    bff-gateway         = local.cognito_env
+    bff-gateway = concat(local.cognito_env, [
+      { name = "INTERNAL_ALB_URL", value = "http://${module.alb.alb_dns_name}" },
+      { name = "USE_ALB", value = "true" },
+    ])
     auth-service        = local.cognito_env
     property-service    = concat(local.cognito_env, local.redis_env)
     lease-service       = concat(local.cognito_env, local.redis_env)

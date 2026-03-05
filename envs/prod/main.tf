@@ -38,6 +38,12 @@ locals {
     ManagedBy = "Terraform"
   }
 
+  # ── BFF gateway needs ALB URL to proxy to backend services ────────────────
+  bff_gateway_extra_env = [
+    { name = "INTERNAL_ALB_URL", value = "http://${module.alb.alb_dns_name}" },
+    { name = "USE_ALB", value = "true" },
+  ]
+
   services = {
     bff-gateway = {
       port              = 3000
@@ -288,6 +294,7 @@ module "services" {
   log_retention_days    = var.log_retention_days
   execution_role_arn    = aws_iam_role.ecs_execution.arn
   ecr_force_delete      = false
+  extra_environment     = each.key == "bff-gateway" ? local.bff_gateway_extra_env : []
   common_tags           = local.common_tags
 }
 
