@@ -146,13 +146,13 @@ locals {
 
   # ── Per-service extra environment variables ──────────────────────────────
   service_extra_env = {
-    bff-gateway          = local.cognito_env
-    auth-service         = local.cognito_env
-    property-service     = concat(local.cognito_env, local.redis_env)
-    lease-service        = concat(local.cognito_env, local.redis_env)
-    tenant-service       = concat(local.cognito_env, local.redis_env)
-    maintenance-service  = concat(local.cognito_env, local.redis_env)
-    payments-service     = concat(local.cognito_env, local.redis_env)
+    bff-gateway         = local.cognito_env
+    auth-service        = local.cognito_env
+    property-service    = concat(local.cognito_env, local.redis_env)
+    lease-service       = concat(local.cognito_env, local.redis_env)
+    tenant-service      = concat(local.cognito_env, local.redis_env)
+    maintenance-service = concat(local.cognito_env, local.redis_env)
+    payments-service    = concat(local.cognito_env, local.redis_env)
     notification-service = concat(local.cognito_env, [
       { name = "SQS_QUEUE_URL", value = module.sqs.queue_urls["notifications"] },
     ])
@@ -603,10 +603,11 @@ module "observability" {
 module "github_oidc" {
   source = "../../modules/github-oidc"
 
-  name_prefix         = local.name_prefix
-  github_repositories = var.github_oidc_repositories
-  allowed_branch      = "develop"
-  create_oidc_provider = var.create_github_oidc_provider
+  name_prefix                = local.name_prefix
+  github_repositories        = var.github_oidc_repositories
+  allowed_branch             = "develop"
+  create_oidc_provider       = var.create_github_oidc_provider
+  existing_oidc_provider_arn = var.existing_github_oidc_provider_arn
 
   ecr_repository_arns = [
     for k, v in module.services : "arn:aws:ecr:${var.aws_region}:${data.aws_caller_identity.current.account_id}:repository/${v.ecr_repository_name}"
