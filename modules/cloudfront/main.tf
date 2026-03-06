@@ -110,6 +110,11 @@ resource "aws_cloudfront_distribution" "main" {
       domain_name = origin.value
       origin_id   = "web-alb"
 
+      custom_header {
+        name  = "X-Forwarded-Proto"
+        value = "https"
+      }
+
       custom_origin_config {
         http_port              = 80
         https_port             = 443
