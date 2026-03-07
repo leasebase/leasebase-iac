@@ -22,6 +22,11 @@ output "cloudfront_domain" {
   value = module.cloudfront.distribution_domain_name
 }
 
+output "cloudfront_distribution_id" {
+  description = "CloudFront distribution ID (for cache invalidation in deploy scripts)"
+  value       = module.cloudfront.distribution_id
+}
+
 # Cognito
 output "cognito_user_pool_id" {
   value = module.cognito.user_pool_id
@@ -74,4 +79,10 @@ output "event_bus_name" {
 # SQS
 output "sqs_queue_urls" {
   value = module.sqs.queue_urls
+}
+
+# GitHub Actions OIDC
+output "github_actions_role_arn" {
+  description = "IAM role ARN for GitHub Actions. Set as AWS_ROLE_ARN repo variable."
+  value       = module.github_oidc.role_arn
 }

@@ -145,12 +145,15 @@ resource "aws_security_group" "service" {
   description = "Security group for ${var.name} ECS service"
   vpc_id      = var.vpc_id
 
-  ingress {
-    description     = "Traffic from ALB"
-    from_port       = var.container_port
-    to_port         = var.container_port
-    protocol        = "tcp"
-    security_groups = [var.alb_security_group_id]
+  dynamic "ingress" {
+    for_each = var.register_with_alb ? [1] : []
+    content {
+      description     = "Traffic from internal ALB"
+      from_port       = var.container_port
+      to_port         = var.container_port
+      protocol        = "tcp"
+      security_groups = [var.alb_security_group_id]
+    }
   }
 
   egress {
@@ -170,11 +173,14 @@ resource "aws_security_group" "service" {
   }
 }
 
+
 ################################################################################
 # Target Group + Listener Rule
 ################################################################################
 
 resource "aws_lb_target_group" "main" {
+  count = var.register_with_alb ? 1 : 0
+
   name        = "${var.name_prefix}-${replace(var.name, "-service", "")}"
   port        = var.container_port
   protocol    = "HTTP"
@@ -203,12 +209,14 @@ resource "aws_lb_target_group" "main" {
 }
 
 resource "aws_lb_listener_rule" "main" {
+  count = var.register_with_alb ? 1 : 0
+
   listener_arn = var.alb_listener_arn
   priority     = var.priority
 
   action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.main.arn
+    target_group_arn = aws_lb_target_group.main[0].arn
   }
 
   condition {
@@ -223,7 +231,15 @@ resource "aws_lb_listener_rule" "main" {
 }
 
 ################################################################################
-# ECS Task Definition
+# ECS Task Definition (bootstrap / env-var seed)
+#
+# CI (deploy_ecs.sh) owns the task definition lifecycle after initial creation.
+# On each deploy, CI fetches the latest revision, swaps the image tag, and
+# registers a new revision — preserving all env vars set here.
+#
+# To add or change env vars: update extra_environment in the env config,
+# run terraform apply, then trigger a CI deploy (or force a redeployment)
+# so the new revision inherits the updated vars.
 ################################################################################
 
 resource "aws_ecs_task_definition" "main" {
@@ -269,7 +285,7 @@ resource "aws_ecs_task_definition" "main" {
       }
 
       healthCheck = {
-        command     = ["CMD-SHELL", "wget -q --spider http://localhost:${var.container_port}${var.health_check_path} || exit 1"]
+        command     = ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:${var.container_port}${var.health_check_path} || exit 1"]
         interval    = 30
         timeout     = 5
         retries     = 3
@@ -300,10 +316,22 @@ resource "aws_ecs_service" "main" {
     assign_public_ip = false
   }
 
-  load_balancer {
-    target_group_arn = aws_lb_target_group.main.arn
-    container_name   = var.name
-    container_port   = var.container_port
+  dynamic "load_balancer" {
+    for_each = var.register_with_alb ? [aws_lb_target_group.main[0].arn] : []
+    content {
+      target_group_arn = load_balancer.value
+      container_name   = var.name
+      container_port   = var.container_port
+    }
+  }
+
+  dynamic "load_balancer" {
+    for_each = var.additional_target_group_arns
+    content {
+      target_group_arn = load_balancer.value
+      container_name   = var.name
+      container_port   = var.container_port
+    }
   }
 
   deployment_circuit_breaker {
@@ -317,6 +345,8 @@ resource "aws_ecs_service" "main" {
   propagate_tags = "TASK_DEFINITION"
 
   lifecycle {
+    # desired_count: managed by autoscaling, not Terraform
+    # task_definition: managed by CI (deploy_ecs.sh), not Terraform
     ignore_changes = [desired_count, task_definition]
   }
 

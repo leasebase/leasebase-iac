@@ -116,3 +116,25 @@ variable "sqs_queues" {
     reporting-jobs      = { visibility_timeout = 900 }
   }
 }
+
+# GitHub OIDC
+variable "github_oidc_repositories" {
+  description = "GitHub repos allowed to assume the CI/CD role (format: org/repo)"
+  type        = list(string)
+  default = [
+    "leasebase/leasebase_all",
+    "leasebase/leasebase-*",
+  ]
+}
+
+variable "create_github_oidc_provider" {
+  description = "Create the GitHub OIDC provider (set false if already exists in account)"
+  type        = bool
+  default     = false
+}
+
+variable "existing_github_oidc_provider_arn" {
+  description = "ARN of existing OIDC provider (when create_github_oidc_provider = false)"
+  type        = string
+  default     = "arn:aws:iam::335021149718:oidc-provider/token.actions.githubusercontent.com"
+}
