@@ -39,11 +39,11 @@ locals {
   }
 
   # ── Cognito env vars shared by all services ──────────────────────────────
+  # Canonical Cognito env vars injected into all ECS services.
+  # All backend code reads COGNITO_CLIENT_ID (see service-common getJwtConfig).
   cognito_env = [
     { name = "COGNITO_USER_POOL_ID", value = module.cognito.user_pool_id },
     { name = "COGNITO_CLIENT_ID", value = module.cognito.web_client_id },
-    # TODO: Remove COGNITO_WEB_CLIENT_ID once all services read COGNITO_CLIENT_ID
-    { name = "COGNITO_WEB_CLIENT_ID", value = module.cognito.web_client_id },
     { name = "COGNITO_REGION", value = var.aws_region },
     { name = "JWKS_URI", value = "https://cognito-idp.${var.aws_region}.amazonaws.com/${module.cognito.user_pool_id}/.well-known/jwks.json" },
   ]
@@ -156,18 +156,24 @@ locals {
   }
 
   # ── Per-service extra environment variables ──────────────────────────────
+  # Dev auth bypass — allows E2E tests to log in via header-based bypass.
+  # Must NEVER be set in production.
+  dev_bypass_env = [
+    { name = "DEV_AUTH_BYPASS", value = "true" },
+  ]
+
   service_extra_env = {
-    bff-gateway = concat(local.cognito_env, [
+    bff-gateway = concat(local.cognito_env, local.dev_bypass_env, [
       { name = "INTERNAL_ALB_URL", value = "http://${module.alb.alb_dns_name}" },
       { name = "USE_ALB", value = "true" },
       { name = "CORS_ORIGIN", value = var.domain_name != "" ? "https://${var.domain_name}" : "http://localhost:3000" },
     ])
-    auth-service        = local.cognito_env
-    property-service    = concat(local.cognito_env, local.redis_env)
-    lease-service       = concat(local.cognito_env, local.redis_env)
-    tenant-service      = concat(local.cognito_env, local.redis_env)
-    maintenance-service = concat(local.cognito_env, local.redis_env)
-    payments-service    = concat(local.cognito_env, local.redis_env)
+    auth-service        = concat(local.cognito_env, local.dev_bypass_env)
+    property-service    = concat(local.cognito_env, local.redis_env, local.dev_bypass_env)
+    lease-service       = concat(local.cognito_env, local.redis_env, local.dev_bypass_env)
+    tenant-service      = concat(local.cognito_env, local.redis_env, local.dev_bypass_env)
+    maintenance-service = concat(local.cognito_env, local.redis_env, local.dev_bypass_env)
+    payments-service    = concat(local.cognito_env, local.redis_env, local.dev_bypass_env)
     notification-service = concat(local.cognito_env, [
       { name = "SQS_QUEUE_URL", value = module.sqs.queue_urls["notifications"] },
     ])
