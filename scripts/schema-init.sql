@@ -279,7 +279,9 @@ GRANT SELECT ON ALL TABLES IN SCHEMA tenant_service TO lease_user;
 ALTER DEFAULT PRIVILEGES FOR ROLE leasebase_admin IN SCHEMA tenant_service GRANT SELECT ON TABLES TO lease_user;
 
 -- tenant_user reads: lease_service, property_service, payments_service, maintenance_service
-\echo '  → tenant_user cross-schema reads'
+-- tenant_user writes: lease_service.leases (invitation acceptance creates leases),
+--                     property_service.units (invitation acceptance sets unit to OCCUPIED)
+\echo '  → tenant_user cross-schema reads + targeted writes'
 GRANT USAGE ON SCHEMA lease_service TO tenant_user;
 GRANT SELECT ON ALL TABLES IN SCHEMA lease_service TO tenant_user;
 ALTER DEFAULT PRIVILEGES FOR ROLE leasebase_admin IN SCHEMA lease_service GRANT SELECT ON TABLES TO tenant_user;
@@ -287,6 +289,16 @@ ALTER DEFAULT PRIVILEGES FOR ROLE leasebase_admin IN SCHEMA lease_service GRANT 
 GRANT USAGE ON SCHEMA property_service TO tenant_user;
 GRANT SELECT ON ALL TABLES IN SCHEMA property_service TO tenant_user;
 ALTER DEFAULT PRIVILEGES FOR ROLE leasebase_admin IN SCHEMA property_service GRANT SELECT ON TABLES TO tenant_user;
+
+-- Targeted write grants for invitation acceptance flow
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'lease_service' AND table_name = 'leases') THEN
+    EXECUTE 'GRANT INSERT ON lease_service.leases TO tenant_user';
+  END IF;
+  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'property_service' AND table_name = 'units') THEN
+    EXECUTE 'GRANT UPDATE ON property_service.units TO tenant_user';
+  END IF;
+END $$;
 
 GRANT USAGE ON SCHEMA payments_service TO tenant_user;
 GRANT SELECT ON ALL TABLES IN SCHEMA payments_service TO tenant_user;
