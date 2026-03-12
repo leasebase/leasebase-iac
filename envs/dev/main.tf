@@ -156,9 +156,10 @@ locals {
   }
 
   # ── CORS origins (shared by BFF gateway and API Gateway) ─────────────────
+  # Only the primary app domain and localhost are trusted origins.
+  # Vanity subdomains (signin.*, signup.*) are NOT trusted — they 302 to app.*.
   cors_origins = compact(concat(
     var.domain_name != "" ? ["https://${var.domain_name}"] : [],
-    [for s in var.portal_subdomains : "https://${s}.${var.root_domain_name}"],
     ["http://localhost:3000"],
   ))
 
@@ -183,7 +184,7 @@ locals {
     tenant-service = concat(local.cognito_env, local.redis_env, [
       { name = "INTERNAL_SERVICE_KEY", value = local.internal_service_key },
       { name = "AUTH_SERVICE_URL", value = "http://${module.alb.alb_dns_name}" },
-      { name = "APP_DOMAIN", value = var.root_domain_name },
+      { name = "APP_BASE_URL", value = "https://${var.domain_name}" },
     ])
     maintenance-service = concat(local.cognito_env, local.redis_env)
     payments-service    = concat(local.cognito_env, local.redis_env)
@@ -445,10 +446,10 @@ module "apigw" {
   # CORS: web frontend (all persona subdomains) and local dev
   cors_allow_origins = local.cors_origins
 
-  # Custom domain: api.dev.leasebase.co
+  # Custom domain: api.dev.leasebase.ai
   custom_domain_name            = var.api_domain_name
   custom_domain_certificate_arn = var.api_domain_name != "" ? aws_acm_certificate_validation.regional.certificate_arn : ""
-  custom_domain_zone_id         = var.api_domain_name != "" ? data.aws_route53_zone.main[0].zone_id : ""
+  custom_domain_zone_id         = var.api_domain_name != "" ? aws_route53_zone.leasebase_ai.zone_id : ""
 }
 
 ################################################################################
@@ -755,9 +756,9 @@ module "cloudfront" {
   acm_certificate_arn  = var.cloudfront_acm_certificate_arn
   domain_aliases = var.cloudfront_acm_certificate_arn != "" ? concat(
     [var.domain_name],
-    # Only add portal subdomains when CloudFront is the routing target;
+    # Vanity redirect domains added when CloudFront is the routing target;
     # the us-east-1 cert must cover *.root_domain_name for this to work.
-    var.route53_web_target == "cloudfront" ? [for s in var.portal_subdomains : "${s}.${var.root_domain_name}"] : [],
+    var.route53_web_target == "cloudfront" ? var.vanity_redirect_domains : [],
   ) : []
   web_acl_arn      = module.waf.web_acl_arn
   web_alb_dns_name = aws_lb.web_alb.dns_name
@@ -765,19 +766,39 @@ module "cloudfront" {
 }
 
 ################################################################################
-# Route53
+# Route53 — leasebase.ai hosted zone (shared/global, managed from DEV stack)
 ################################################################################
 
-data "aws_route53_zone" "main" {
-  count = var.domain_name != "" ? 1 : 0
-  name  = var.root_domain_name
+resource "aws_route53_zone" "leasebase_ai" {
+  name = var.root_domain_name
+  tags = merge(local.common_tags, {
+    Name = "${var.root_domain_name}-zone"
+    Note = "Shared/global zone. Managed from DEV stack because DEV is the only stack today."
+  })
 }
 
-# dev.leasebase.co — points to either the public web ALB or CloudFront,
+# WordPress marketing site — apex and www
+resource "aws_route53_record" "wordpress_apex" {
+  zone_id = aws_route53_zone.leasebase_ai.zone_id
+  name    = var.root_domain_name
+  type    = "A"
+  ttl     = 300
+  records = ["54.242.108.62"]
+}
+
+resource "aws_route53_record" "wordpress_www" {
+  zone_id = aws_route53_zone.leasebase_ai.zone_id
+  name    = "www.${var.root_domain_name}"
+  type    = "A"
+  ttl     = 300
+  records = ["54.242.108.62"]
+}
+
+# app.dev.leasebase.ai — points to either the public web ALB or CloudFront,
 # controlled by var.route53_web_target for safe 2-step cutover.
 resource "aws_route53_record" "web" {
   count   = var.domain_name != "" ? 1 : 0
-  zone_id = data.aws_route53_zone.main[0].zone_id
+  zone_id = aws_route53_zone.leasebase_ai.zone_id
   name    = var.domain_name
   type    = "A"
 
@@ -796,33 +817,76 @@ resource "aws_route53_record" "web" {
   }
 }
 
-# Persona portal subdomains — all point to the same frontend target.
-# signup.leasebase.co, login.leasebase.co, owner.leasebase.co,
-# manager.leasebase.co, tenant.leasebase.co
-resource "aws_route53_record" "portal_subdomains" {
-  for_each = var.domain_name != "" ? toset(var.portal_subdomains) : toset([])
+# Vanity redirect subdomains — all point to the web ALB for 302 redirect.
+# signin.dev.leasebase.ai, signup.dev.leasebase.ai
+resource "aws_route53_record" "vanity_redirects" {
+  for_each = var.domain_name != "" ? toset(var.vanity_redirect_domains) : toset([])
 
-  zone_id = data.aws_route53_zone.main[0].zone_id
-  name    = "${each.value}.${var.root_domain_name}"
+  zone_id = aws_route53_zone.leasebase_ai.zone_id
+  name    = each.value
   type    = "A"
 
   alias {
-    name = (
-      var.route53_web_target == "cloudfront" && var.enable_cloudfront
-      ? module.cloudfront[0].distribution_domain_name
-      : aws_lb.web_alb.dns_name
-    )
-    zone_id = (
-      var.route53_web_target == "cloudfront" && var.enable_cloudfront
-      ? module.cloudfront[0].distribution_hosted_zone_id
-      : aws_lb.web_alb.zone_id
-    )
-    evaluate_target_health = var.route53_web_target == "alb"
+    name                   = aws_lb.web_alb.dns_name
+    zone_id                = aws_lb.web_alb.zone_id
+    evaluate_target_health = true
   }
 }
 
 ################################################################################
-# ACM Certificate (us-west-2) — covers dev.leasebase.co + api.dev.leasebase.co
+# ALB Vanity Redirect Listener Rules (signin.* → /auth/login, signup.* → /auth/register)
+################################################################################
+
+resource "aws_lb_listener_rule" "vanity_signin_redirect" {
+  count        = var.domain_name != "" && length([for d in var.vanity_redirect_domains : d if can(regex("^signin\\.", d))]) > 0 ? 1 : 0
+  listener_arn = aws_lb_listener.web_alb_https.arn
+  priority     = 10
+
+  condition {
+    host_header {
+      values = [for d in var.vanity_redirect_domains : d if can(regex("^signin\\.", d))]
+    }
+  }
+
+  action {
+    type = "redirect"
+    redirect {
+      host        = var.domain_name
+      path        = "/auth/login"
+      query       = ""
+      port        = "443"
+      protocol    = "HTTPS"
+      status_code = "HTTP_302"
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "vanity_signup_redirect" {
+  count        = var.domain_name != "" && length([for d in var.vanity_redirect_domains : d if can(regex("^signup\\.", d))]) > 0 ? 1 : 0
+  listener_arn = aws_lb_listener.web_alb_https.arn
+  priority     = 11
+
+  condition {
+    host_header {
+      values = [for d in var.vanity_redirect_domains : d if can(regex("^signup\\.", d))]
+    }
+  }
+
+  action {
+    type = "redirect"
+    redirect {
+      host        = var.domain_name
+      path        = "/auth/register"
+      query       = ""
+      port        = "443"
+      protocol    = "HTTPS"
+      status_code = "HTTP_302"
+    }
+  }
+}
+
+################################################################################
+# ACM Certificate (us-west-2) — covers app.dev.leasebase.ai + api.dev.leasebase.ai + *.dev.leasebase.ai
 ################################################################################
 
 resource "aws_acm_certificate" "regional" {
@@ -831,7 +895,7 @@ resource "aws_acm_certificate" "regional" {
   domain_name = var.domain_name
   subject_alternative_names = compact(concat(
     var.api_domain_name != "" ? [var.api_domain_name] : [],
-    ["*.${var.root_domain_name}"],
+    var.env_subdomain_prefix != "" ? ["*.${var.env_subdomain_prefix}.${var.root_domain_name}"] : ["*.${var.root_domain_name}"],
   ))
   validation_method = "DNS"
 
@@ -854,7 +918,7 @@ resource "aws_route53_record" "cert_validation" {
     }
   }
 
-  zone_id         = data.aws_route53_zone.main[0].zone_id
+  zone_id         = aws_route53_zone.leasebase_ai.zone_id
   name            = each.value.name
   type            = each.value.type
   records         = [each.value.record]
@@ -865,6 +929,62 @@ resource "aws_route53_record" "cert_validation" {
 resource "aws_acm_certificate_validation" "regional" {
   certificate_arn         = aws_acm_certificate.regional[0].arn
   validation_record_fqdns = [for record in aws_route53_record.cert_validation : record.fqdn]
+}
+
+################################################################################
+# Legacy ACM Certificate — *.leasebase.co (old-domain redirect TLS continuity)
+# Remove when old-domain redirects are decommissioned.
+################################################################################
+
+resource "aws_acm_certificate" "old_domain_redirect" {
+  count             = var.old_root_domain_name != "" ? 1 : 0
+  domain_name       = "*.${var.old_root_domain_name}"
+  validation_method = "DNS"
+
+  tags = merge(local.common_tags, {
+    Name = "${local.name_prefix}-old-domain-cert"
+  })
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+data "aws_route53_zone" "old_domain" {
+  count = var.old_root_domain_name != "" ? 1 : 0
+  name  = var.old_root_domain_name
+}
+
+resource "aws_route53_record" "old_cert_validation" {
+  for_each = {
+    for dvo in(var.old_root_domain_name != "" ? aws_acm_certificate.old_domain_redirect[0].domain_validation_options : []) :
+    dvo.domain_name => {
+      name   = dvo.resource_record_name
+      record = dvo.resource_record_value
+      type   = dvo.resource_record_type
+    }
+  }
+
+  zone_id         = data.aws_route53_zone.old_domain[0].zone_id
+  name            = each.value.name
+  type            = each.value.type
+  records         = [each.value.record]
+  ttl             = 60
+  allow_overwrite = true
+}
+
+resource "aws_acm_certificate_validation" "old_domain_redirect" {
+  count                   = var.old_root_domain_name != "" ? 1 : 0
+  certificate_arn         = aws_acm_certificate.old_domain_redirect[0].arn
+  validation_record_fqdns = [for r in aws_route53_record.old_cert_validation : r.fqdn]
+}
+
+# Attach legacy cert to web ALB as additional cert (SNI).
+# This allows old-domain HTTPS to terminate at the ALB so middleware can 301.
+resource "aws_lb_listener_certificate" "old_domain" {
+  count           = var.old_root_domain_name != "" ? 1 : 0
+  listener_arn    = aws_lb_listener.web_alb_https.arn
+  certificate_arn = aws_acm_certificate_validation.old_domain_redirect[0].certificate_arn
 }
 
 ################################################################################
