@@ -48,24 +48,34 @@ GRANT SELECT ON public.users TO maintenance_user;
 GRANT SELECT ON public.users TO bff_user;
 GRANT SELECT ON public.users TO reporting_user;
 
--- ── public.tenant_profiles ──────────────────────────────────────────────────
--- Referenced by: property-service (pm-dashboard, pm-routes)
+-- ── public.tenant_profiles ──────────────────────────────────────────────────────────
+-- Referenced by: property-service (pm-dashboard, pm-routes), payments-service (/mine),
+--               document-service (/mine)
 -- Maps from: public."TenantProfile" (Prisma-managed)
 
 \echo '  → public.tenant_profiles'
 CREATE OR REPLACE VIEW public.tenant_profiles AS
 SELECT
-  "id"         AS id,
-  "userId"     AS user_id,
-  "leaseId"    AS lease_id,
-  "phone"      AS phone,
-  "createdAt"  AS created_at,
-  "updatedAt"  AS updated_at
+  "id"                        AS id,
+  "userId"                    AS user_id,
+  "leaseId"                   AS lease_id,
+  "organizationId"            AS organization_id,
+  "phone"                     AS phone,
+  "status"                    AS status,
+  "emergency_contact"         AS emergency_contact,
+  "notification_preferences"  AS notification_preferences,
+  "move_in_date"              AS move_in_date,
+  "move_out_date"             AS move_out_date,
+  "notes"                     AS notes,
+  "createdAt"                 AS created_at,
+  "updatedAt"                 AS updated_at
 FROM public."TenantProfile";
 
 -- Grant SELECT to roles that need tenant profile lookups
 GRANT SELECT ON public.tenant_profiles TO property_user;
 GRANT SELECT ON public.tenant_profiles TO lease_user;
+GRANT SELECT ON public.tenant_profiles TO payments_user;
+GRANT SELECT ON public.tenant_profiles TO document_user;
 GRANT SELECT ON public.tenant_profiles TO reporting_user;
 
 \echo '=== Compatibility views: complete ==='
