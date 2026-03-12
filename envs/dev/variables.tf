@@ -52,15 +52,27 @@ variable "cloudfront_acm_certificate_arn" {
 }
 
 variable "domain_name" {
-  description = "Custom domain for CloudFront (e.g. dev.leasebase.co)"
+  description = "Primary web domain (e.g. app.dev.leasebase.ai)"
   type        = string
   default     = ""
 }
 
 variable "root_domain_name" {
-  description = "Root domain for Route53 hosted zone lookup (e.g. leasebase.co)"
+  description = "Root domain for the Route53 hosted zone (e.g. leasebase.ai)"
   type        = string
-  default     = "leasebase.co"
+  default     = "leasebase.ai"
+}
+
+variable "env_subdomain_prefix" {
+  description = "Environment subdomain prefix (e.g. 'dev', 'staging'). Empty for production."
+  type        = string
+  default     = ""
+}
+
+variable "old_root_domain_name" {
+  description = "Old root domain for migration redirects (e.g. leasebase.co). Empty to skip legacy cert."
+  type        = string
+  default     = ""
 }
 
 variable "api_domain_name" {
@@ -130,10 +142,10 @@ variable "route53_web_target" {
   }
 }
 
-variable "portal_subdomains" {
-  description = "Subdomain prefixes for persona portals (all route to the web frontend)"
+variable "vanity_redirect_domains" {
+  description = "Vanity subdomains that ALB 302-redirects to the primary app domain (e.g. signin.dev.leasebase.ai)"
   type        = list(string)
-  default     = ["signup", "login", "owner", "manager", "tenant"]
+  default     = []
 }
 
 # SQS
