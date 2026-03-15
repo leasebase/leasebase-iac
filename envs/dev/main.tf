@@ -185,6 +185,8 @@ locals {
       { name = "INTERNAL_SERVICE_KEY", value = local.internal_service_key },
       { name = "AUTH_SERVICE_URL", value = "http://${module.alb.alb_dns_name}" },
       { name = "APP_BASE_URL", value = "https://${var.domain_name}" },
+      { name = "SES_FROM_EMAIL", value = "noreply@leasebase.ai" },
+      { name = "SES_REGION", value = "us-east-1" },
     ])
     maintenance-service = concat(local.cognito_env, local.redis_env)
     payments-service    = concat(local.cognito_env, local.redis_env)
@@ -234,6 +236,22 @@ locals {
 
   # ── Per-service IAM statements ──────────────────────────────────────────
   service_extra_iam = {
+    auth-service = [
+      {
+        Sid      = "CognitoAdminTenantLifecycle"
+        Effect   = "Allow"
+        Action   = ["cognito-idp:AdminCreateUser", "cognito-idp:AdminSetUserPassword", "cognito-idp:AdminDeleteUser"]
+        Resource = [module.cognito.user_pool_arn]
+      },
+    ]
+    tenant-service = [
+      {
+        Sid      = "SESSendEmail"
+        Effect   = "Allow"
+        Action   = ["ses:SendEmail", "ses:SendRawEmail"]
+        Resource = ["arn:aws:ses:us-east-1:${data.aws_caller_identity.current.account_id}:identity/*"]
+      },
+    ]
     document-service = [
       {
         Sid      = "S3DocumentAccess"
