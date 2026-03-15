@@ -155,17 +155,39 @@ locals {
     }
   }
 
+  # ── CORS origins (shared by BFF gateway and API Gateway) ─────────────────
+  # Only the primary app domain and localhost are trusted origins.
+  # Vanity subdomains (signin.*, signup.*) are NOT trusted — they 302 to app.*.
+  cors_origins = compact(concat(
+    var.domain_name != "" ? ["https://${var.domain_name}"] : [],
+    ["http://localhost:3000"],
+  ))
+
+  # Shared internal service key for service-to-service auth (invitation flow).
+  # In production this should come from Secrets Manager.
+  internal_service_key = random_password.internal_service_key.result
+
   # ── Per-service extra environment variables ──────────────────────────────
   service_extra_env = {
     bff-gateway = concat(local.cognito_env, [
       { name = "INTERNAL_ALB_URL", value = "http://${module.alb.alb_dns_name}" },
       { name = "USE_ALB", value = "true" },
-      { name = "CORS_ORIGIN", value = var.domain_name != "" ? "https://${var.domain_name}" : "http://localhost:3000" },
+      { name = "CORS_ORIGIN", value = join(",", local.cors_origins) },
     ])
-    auth-service        = local.cognito_env
-    property-service    = concat(local.cognito_env, local.redis_env)
-    lease-service       = concat(local.cognito_env, local.redis_env)
-    tenant-service      = concat(local.cognito_env, local.redis_env)
+    auth-service = concat(local.cognito_env, [
+      { name = "INTERNAL_SERVICE_KEY", value = local.internal_service_key },
+    ])
+    property-service = concat(local.cognito_env, local.redis_env)
+    lease-service = concat(local.cognito_env, local.redis_env, [
+      { name = "DATABASE_SCHEMA", value = "lease_service" },
+    ])
+    tenant-service = concat(local.cognito_env, local.redis_env, [
+      { name = "INTERNAL_SERVICE_KEY", value = local.internal_service_key },
+      { name = "AUTH_SERVICE_URL", value = "http://${module.alb.alb_dns_name}" },
+      { name = "APP_BASE_URL", value = "https://${var.domain_name}" },
+      { name = "SES_FROM_EMAIL", value = "noreply@leasebase.ai" },
+      { name = "SES_REGION", value = "us-east-1" },
+    ])
     maintenance-service = concat(local.cognito_env, local.redis_env)
     payments-service    = concat(local.cognito_env, local.redis_env)
     notification-service = concat(local.cognito_env, [
@@ -183,12 +205,18 @@ locals {
       { name = "NEXT_PUBLIC_API_BASE_URL", value = "https://${var.api_domain_name}" },
       { name = "HOSTNAME", value = "0.0.0.0" },
       { name = "NEXT_PUBLIC_APP_URL", value = "https://${var.domain_name}" },
+      { name = "NEXT_PUBLIC_APP_DOMAIN", value = var.root_domain_name },
+      { name = "ENABLE_OLD_DOMAIN_REDIRECTS", value = var.old_root_domain_name != "" ? "true" : "false" },
+      { name = "OLD_DOMAIN", value = var.old_root_domain_name },
     ])
   }
 
-  # ── Per-service DB secret references ────────────────────────────────────
-  # Maps service names that need DB access to their Secrets Manager secret ARN
-  service_db_secret_map = {
+  # ── Per-service DB secret references ──────────────────────────────
+  # Derived from the canonical service_db_config — no hand-maintained map.
+  # Maps ECS service name (with "-service" suffix) → config key in the module.
+  service_db_key_map = {
+    bff-gateway          = "bff"
+    auth-service         = "auth"
     property-service     = "property"
     lease-service        = "lease"
     tenant-service       = "tenant"
@@ -199,14 +227,31 @@ locals {
     reporting-service    = "reporting"
   }
 
+  # Only inject DATABASE_SECRET_ARN for services that actually need DB access
   service_secrets = {
-    for svc, schema_key in local.service_db_secret_map : svc => [
-      { name = "DATABASE_SECRET_ARN", valueFrom = module.database_platform.service_secret_arns[schema_key] },
-    ]
+    for svc, cfg_key in local.service_db_key_map : svc => [
+      { name = "DATABASE_SECRET_ARN", valueFrom = module.database_platform.service_secret_arns[cfg_key] },
+    ] if contains(module.database_platform.db_service_names, cfg_key)
   }
 
   # ── Per-service IAM statements ──────────────────────────────────────────
   service_extra_iam = {
+    auth-service = [
+      {
+        Sid      = "CognitoAdminTenantLifecycle"
+        Effect   = "Allow"
+        Action   = ["cognito-idp:AdminCreateUser", "cognito-idp:AdminSetUserPassword", "cognito-idp:AdminDeleteUser"]
+        Resource = [module.cognito.user_pool_arn]
+      },
+    ]
+    tenant-service = [
+      {
+        Sid      = "SESSendEmail"
+        Effect   = "Allow"
+        Action   = ["ses:SendEmail", "ses:SendRawEmail"]
+        Resource = ["arn:aws:ses:us-east-1:${data.aws_caller_identity.current.account_id}:identity/*"]
+      },
+    ]
     document-service = [
       {
         Sid      = "S3DocumentAccess"
@@ -238,6 +283,15 @@ locals {
       },
     ]
   }
+}
+
+################################################################################
+# Internal Service Key (service-to-service auth)
+################################################################################
+
+resource "random_password" "internal_service_key" {
+  length  = 48
+  special = false
 }
 
 ################################################################################
@@ -409,16 +463,13 @@ module "apigw" {
   alb_listener_arn = module.alb.listener_arn
   common_tags      = local.common_tags
 
-  # CORS: only the web frontend and local dev
-  cors_allow_origins = compact([
-    var.domain_name != "" ? "https://${var.domain_name}" : "",
-    "http://localhost:3000",
-  ])
+  # CORS: web frontend (all persona subdomains) and local dev
+  cors_allow_origins = local.cors_origins
 
-  # Custom domain: api.dev.leasebase.co
+  # Custom domain: api.dev.leasebase.ai
   custom_domain_name            = var.api_domain_name
   custom_domain_certificate_arn = var.api_domain_name != "" ? aws_acm_certificate_validation.regional.certificate_arn : ""
-  custom_domain_zone_id         = var.api_domain_name != "" ? data.aws_route53_zone.main[0].zone_id : ""
+  custom_domain_zone_id         = var.api_domain_name != "" ? aws_route53_zone.leasebase_ai.zone_id : ""
 }
 
 ################################################################################
@@ -689,10 +740,11 @@ module "s3_docs" {
 ################################################################################
 
 module "cognito" {
-  source      = "../../modules/cognito"
-  environment = local.environment
-  name_prefix = local.name_prefix
-  common_tags = local.common_tags
+  source             = "../../modules/cognito"
+  environment        = local.environment
+  name_prefix        = local.name_prefix
+  log_retention_days = var.log_retention_days
+  common_tags        = local.common_tags
 }
 
 ################################################################################
@@ -723,26 +775,51 @@ module "cloudfront" {
   name_prefix          = local.name_prefix
   api_gateway_endpoint = module.apigw.api_endpoint
   acm_certificate_arn  = var.cloudfront_acm_certificate_arn
-  domain_aliases       = var.cloudfront_acm_certificate_arn != "" ? [var.domain_name] : []
-  web_acl_arn          = module.waf.web_acl_arn
-  web_alb_dns_name     = aws_lb.web_alb.dns_name
-  common_tags          = local.common_tags
+  domain_aliases = var.cloudfront_acm_certificate_arn != "" ? concat(
+    [var.domain_name],
+    # Vanity redirect domains added when CloudFront is the routing target;
+    # the us-east-1 cert must cover *.root_domain_name for this to work.
+    var.route53_web_target == "cloudfront" ? var.vanity_redirect_domains : [],
+  ) : []
+  web_acl_arn      = module.waf.web_acl_arn
+  web_alb_dns_name = aws_lb.web_alb.dns_name
+  common_tags      = local.common_tags
 }
 
 ################################################################################
-# Route53
+# Route53 — leasebase.ai hosted zone (shared/global, managed from DEV stack)
 ################################################################################
 
-data "aws_route53_zone" "main" {
-  count = var.domain_name != "" ? 1 : 0
-  name  = var.root_domain_name
+resource "aws_route53_zone" "leasebase_ai" {
+  name = var.root_domain_name
+  tags = merge(local.common_tags, {
+    Name = "${var.root_domain_name}-zone"
+    Note = "Shared/global zone. Managed from DEV stack because DEV is the only stack today."
+  })
 }
 
-# dev.leasebase.co — points to either the public web ALB or CloudFront,
+# WordPress marketing site — apex and www
+resource "aws_route53_record" "wordpress_apex" {
+  zone_id = aws_route53_zone.leasebase_ai.zone_id
+  name    = var.root_domain_name
+  type    = "A"
+  ttl     = 300
+  records = ["54.242.108.62"]
+}
+
+resource "aws_route53_record" "wordpress_www" {
+  zone_id = aws_route53_zone.leasebase_ai.zone_id
+  name    = "www.${var.root_domain_name}"
+  type    = "A"
+  ttl     = 300
+  records = ["54.242.108.62"]
+}
+
+# app.dev.leasebase.ai — points to either the public web ALB or CloudFront,
 # controlled by var.route53_web_target for safe 2-step cutover.
 resource "aws_route53_record" "web" {
   count   = var.domain_name != "" ? 1 : 0
-  zone_id = data.aws_route53_zone.main[0].zone_id
+  zone_id = aws_route53_zone.leasebase_ai.zone_id
   name    = var.domain_name
   type    = "A"
 
@@ -761,16 +838,87 @@ resource "aws_route53_record" "web" {
   }
 }
 
+# Vanity redirect subdomains — all point to the web ALB for 302 redirect.
+# signin.dev.leasebase.ai, signup.dev.leasebase.ai
+resource "aws_route53_record" "vanity_redirects" {
+  for_each = var.domain_name != "" ? toset(var.vanity_redirect_domains) : toset([])
+
+  zone_id = aws_route53_zone.leasebase_ai.zone_id
+  name    = each.value
+  type    = "A"
+
+  alias {
+    name                   = aws_lb.web_alb.dns_name
+    zone_id                = aws_lb.web_alb.zone_id
+    evaluate_target_health = true
+  }
+}
+
 ################################################################################
-# ACM Certificate (us-west-2) — covers dev.leasebase.co + api.dev.leasebase.co
+# ALB Vanity Redirect Listener Rules (signin.* → /auth/login, signup.* → /auth/register)
+################################################################################
+
+resource "aws_lb_listener_rule" "vanity_signin_redirect" {
+  count        = var.domain_name != "" && length([for d in var.vanity_redirect_domains : d if can(regex("^signin\\.", d))]) > 0 ? 1 : 0
+  listener_arn = aws_lb_listener.web_alb_https.arn
+  priority     = 10
+
+  condition {
+    host_header {
+      values = [for d in var.vanity_redirect_domains : d if can(regex("^signin\\.", d))]
+    }
+  }
+
+  action {
+    type = "redirect"
+    redirect {
+      host        = var.domain_name
+      path        = "/auth/login"
+      query       = ""
+      port        = "443"
+      protocol    = "HTTPS"
+      status_code = "HTTP_302"
+    }
+  }
+}
+
+resource "aws_lb_listener_rule" "vanity_signup_redirect" {
+  count        = var.domain_name != "" && length([for d in var.vanity_redirect_domains : d if can(regex("^signup\\.", d))]) > 0 ? 1 : 0
+  listener_arn = aws_lb_listener.web_alb_https.arn
+  priority     = 11
+
+  condition {
+    host_header {
+      values = [for d in var.vanity_redirect_domains : d if can(regex("^signup\\.", d))]
+    }
+  }
+
+  action {
+    type = "redirect"
+    redirect {
+      host        = var.domain_name
+      path        = "/auth/register"
+      query       = ""
+      port        = "443"
+      protocol    = "HTTPS"
+      status_code = "HTTP_302"
+    }
+  }
+}
+
+################################################################################
+# ACM Certificate (us-west-2) — covers app.dev.leasebase.ai + api.dev.leasebase.ai + *.dev.leasebase.ai
 ################################################################################
 
 resource "aws_acm_certificate" "regional" {
   count = var.domain_name != "" ? 1 : 0
 
-  domain_name               = var.domain_name
-  subject_alternative_names = var.api_domain_name != "" ? [var.api_domain_name] : []
-  validation_method         = "DNS"
+  domain_name = var.domain_name
+  subject_alternative_names = compact(concat(
+    var.api_domain_name != "" ? [var.api_domain_name] : [],
+    var.env_subdomain_prefix != "" ? ["*.${var.env_subdomain_prefix}.${var.root_domain_name}"] : ["*.${var.root_domain_name}"],
+  ))
+  validation_method = "DNS"
 
   tags = merge(local.common_tags, {
     Name = "${local.name_prefix}-regional-cert"
@@ -791,7 +939,7 @@ resource "aws_route53_record" "cert_validation" {
     }
   }
 
-  zone_id         = data.aws_route53_zone.main[0].zone_id
+  zone_id         = aws_route53_zone.leasebase_ai.zone_id
   name            = each.value.name
   type            = each.value.type
   records         = [each.value.record]
@@ -802,6 +950,62 @@ resource "aws_route53_record" "cert_validation" {
 resource "aws_acm_certificate_validation" "regional" {
   certificate_arn         = aws_acm_certificate.regional[0].arn
   validation_record_fqdns = [for record in aws_route53_record.cert_validation : record.fqdn]
+}
+
+################################################################################
+# Legacy ACM Certificate — *.leasebase.co (old-domain redirect TLS continuity)
+# Remove when old-domain redirects are decommissioned.
+################################################################################
+
+resource "aws_acm_certificate" "old_domain_redirect" {
+  count             = var.old_root_domain_name != "" ? 1 : 0
+  domain_name       = "*.${var.old_root_domain_name}"
+  validation_method = "DNS"
+
+  tags = merge(local.common_tags, {
+    Name = "${local.name_prefix}-old-domain-cert"
+  })
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+data "aws_route53_zone" "old_domain" {
+  count = var.old_root_domain_name != "" ? 1 : 0
+  name  = var.old_root_domain_name
+}
+
+resource "aws_route53_record" "old_cert_validation" {
+  for_each = {
+    for dvo in(var.old_root_domain_name != "" ? aws_acm_certificate.old_domain_redirect[0].domain_validation_options : []) :
+    dvo.domain_name => {
+      name   = dvo.resource_record_name
+      record = dvo.resource_record_value
+      type   = dvo.resource_record_type
+    }
+  }
+
+  zone_id         = data.aws_route53_zone.old_domain[0].zone_id
+  name            = each.value.name
+  type            = each.value.type
+  records         = [each.value.record]
+  ttl             = 60
+  allow_overwrite = true
+}
+
+resource "aws_acm_certificate_validation" "old_domain_redirect" {
+  count                   = var.old_root_domain_name != "" ? 1 : 0
+  certificate_arn         = aws_acm_certificate.old_domain_redirect[0].arn
+  validation_record_fqdns = [for r in aws_route53_record.old_cert_validation : r.fqdn]
+}
+
+# Attach legacy cert to web ALB as additional cert (SNI).
+# This allows old-domain HTTPS to terminate at the ALB so middleware can 301.
+resource "aws_lb_listener_certificate" "old_domain" {
+  count           = var.old_root_domain_name != "" ? 1 : 0
+  listener_arn    = aws_lb_listener.web_alb_https.arn
+  certificate_arn = aws_acm_certificate_validation.old_domain_redirect[0].certificate_arn
 }
 
 ################################################################################
